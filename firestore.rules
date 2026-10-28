@@ -1,0 +1,67 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net: Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUserProfile(data, userId) {
+      return data.userId == userId
+        && data.userId == request.auth.uid
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+        && data.college is string && data.college.size() > 0 && data.college.size() <= 120
+        && (!('bio' in data) || (data.bio is string && data.bio.size() <= 500))
+        && (!('year' in data) || (data.year is string && data.year.size() <= 50))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 150))
+        && (!('avatarColor' in data) || (data.avatarColor is string && data.avatarColor.size() <= 20))
+        && (!('avatarInitials' in data) || (data.avatarInitials is string && data.avatarInitials.size() <= 5))
+        && (!('freeStatusNote' in data) || (data.freeStatusNote == null || (data.freeStatusNote is string && data.freeStatusNote.size() <= 200)))
+        && (!('freeUntil' in data) || (data.freeUntil == null || data.freeUntil is number))
+        && (!('isOnboarded' in data) || data.isOnboarded is bool);
+    }
+
+    // User Profiles Collection
+    match /users/{userId} {
+      // Authenticated users can read profiles (e.g., to see other students on campus)
+      // but only the owner can read their own full document or query
+      allow get: if isSignedIn() && isValidId(userId);
+      allow list: if isSignedIn();
+
+      // Users can only create their own profile document
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId);
+
+      // Users can only update their own profile document
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().userId == existing().userId;
+
+      // Users can delete only their own profile
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+  }
+}

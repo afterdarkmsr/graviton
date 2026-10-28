@@ -1,0 +1,6 @@
+{
+  "name": "VibeMatch",
+  "description": "Campus-first social activity platform. Free time? Find your people for badminton, cricket, study sessions, and spontaneous campus hangouts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

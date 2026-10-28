@@ -1,0 +1,78 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Student user profile with campus affiliation, interests, and preferences",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "The authenticated user UID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Student full or preferred name",
+          "maxLength": 100
+        },
+        "email": {
+          "type": "string",
+          "description": "Student email address",
+          "maxLength": 150
+        },
+        "college": {
+          "type": "string",
+          "description": "Student university or college campus",
+          "maxLength": 120
+        },
+        "year": {
+          "type": "string",
+          "description": "Academic year of study",
+          "maxLength": 50
+        },
+        "bio": {
+          "type": "string",
+          "description": "Short student bio and campus vibe description",
+          "maxLength": 500
+        },
+        "avatarColor": {
+          "type": "string",
+          "description": "Hex color code for the user avatar",
+          "maxLength": 20
+        },
+        "avatarInitials": {
+          "type": "string",
+          "description": "User initials displayed on the avatar",
+          "maxLength": 5
+        },
+        "isOnboarded": {
+          "type": "boolean",
+          "description": "Whether the user completed onboarding"
+        },
+        "freeUntil": {
+          "type": "number",
+          "description": "Timestamp epoch until when the student is free"
+        },
+        "freeStatusNote": {
+          "type": "string",
+          "description": "Short note of what activity the student is free for",
+          "maxLength": 200
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp in ISO format"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update timestamp in ISO format"
+        }
+      },
+      "required": ["userId", "name", "college", "isOnboarded"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Stores user profile and campus identity keyed by authenticated UID"
+    }
+  }
+}
