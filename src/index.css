@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   --color-ice: #DDE3E8;
   --color-ice-light: #EEF3F7;
@@ -25,8 +27,26 @@ body {
   min-height: 100vh;
 }
 
+html.dark body {
+  background-color: #0A0E17;
+  color: #F1F5F9;
+}
+
 h1, h2, h3, .font-display {
   font-family: var(--font-display);
+}
+
+/* Smooth transitions for theme toggle, respecting reduced motion */
+@media (prefers-reduced-motion: no-preference) {
+  body,
+  header,
+  nav,
+  article,
+  aside,
+  main,
+  section {
+    transition: background-color 0.2s ease, border-color 0.2s ease, color 0.15s ease;
+  }
 }
 
 /* Custom scrollbars */
@@ -45,7 +65,15 @@ h1, h2, h3, .font-display {
   background: rgba(58, 15, 52, 0.35);
 }
 
+html.dark ::-webkit-scrollbar-thumb {
+  background: rgba(234, 170, 0, 0.25);
+}
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(234, 170, 0, 0.45);
+}
+
 /* Touch action optimization for mobile feel */
 button, a {
   touch-action: manipulation;
 }
+

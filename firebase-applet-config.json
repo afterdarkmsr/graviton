@@ -1,12 +1,12 @@
 {
-  "projectId": "hip-data-5vr20",
-  "appId": "1:475760900047:web:6bcd2cd914b91bbb0a44ba",
-  "apiKey": "AIzaSyAU6EhLWcm02afOnOGknlCboewofqrrgMA",
-  "authDomain": "hip-data-5vr20.firebaseapp.com",
+  "projectId": "vibematchcgc",
+  "appId": "1:405958631392:web:d573b1c424d5b48878d585",
+  "apiKey": "AIzaSyBCGA0dMlmMwMEcs96JK49KZylZDDJ3ogM",
+  "authDomain": "vibematchcgc.firebaseapp.com",
   "firestoreDatabaseId": "ai-studio-vibematch-09820417-4ebc-451c-a187-a205e2662ff9",
-  "storageBucket": "hip-data-5vr20.firebasestorage.app",
-  "messagingSenderId": "475760900047",
+  "storageBucket": "vibematchcgc.firebasestorage.app",
+  "messagingSenderId": "405958631392",
   "measurementId": "",
-  "oAuthClientId": "475760900047-60cc1aa0n3qe31mulvvdn7102i15f19k.apps.googleusercontent.com",
+  "oAuthClientId": "405958631392-ueknqf91ad6nu8h7f0qkd90uckbnj482.apps.googleusercontent.com",
   "recaptchaSiteKey": ""
 }

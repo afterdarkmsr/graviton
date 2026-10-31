@@ -1,25 +1,30 @@
 import React, { useState } from 'react';
+import { User } from 'firebase/auth';
 import { ActivityCategory, AvailabilitySlot, SkillLevel, UserProfile } from '../types';
-import { CATEGORIES_CONFIG, COLLEGES } from '../data/seedData';
+import { CATEGORIES_CONFIG, STUDY_YEAR_OPTIONS } from '../data/seedData';
 import { storageService } from '../services/storageService';
 import { authService } from '../services/authService';
+import { collegeVerificationService } from '../services/collegeVerificationService';
 import {
   Edit3,
   RotateCcw,
   Shield,
+  ShieldCheck,
   Check,
   Save,
   Lock,
   LogOut,
   CloudCheck,
+  Mail,
+  AlertCircle,
 } from 'lucide-react';
 
 interface ProfileScreenProps {
   profile: UserProfile;
+  authUser?: User | null;
   joinedCount: number;
   hostedCount: number;
   onProfileUpdated: (updated: UserProfile) => void;
-  onResetData: () => void;
   onSignOut: () => void;
 }
 
@@ -33,15 +38,14 @@ const AVAILABILITY_OPTIONS: AvailabilitySlot[] = [
 
 export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   profile,
+  authUser,
   joinedCount,
   hostedCount,
   onProfileUpdated,
-  onResetData,
   onSignOut,
 }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [name, setName] = useState(profile.name);
-  const [college, setCollege] = useState(profile.college);
   const [year, setYear] = useState(profile.year);
   const [bio, setBio] = useState(profile.bio);
   const [interests, setInterests] = useState<ActivityCategory[]>(profile.interests);
@@ -55,16 +59,102 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
+  // College Verification state (100% Optional)
+  const [collegeEmailInput, setCollegeEmailInput] = useState('');
+  const [isSendingLink, setIsSendingLink] = useState(false);
+  const [linkSentEmail, setLinkSentEmail] = useState<string | null>(() =>
+    collegeVerificationService.getPendingEmail()
+  );
+  const [verificationError, setVerificationError] = useState<string | null>(null);
+  const [isSkipped, setIsSkipped] = useState<boolean>(() =>
+    collegeVerificationService.isDismissedByUser()
+  );
+  const [isCheckingLink, setIsCheckingLink] = useState(false);
+
+  const verificationState = collegeVerificationService.getVerificationState(authUser || null);
+
+  const handleSendVerification = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    setVerificationError(null);
+
+    const trimmed = collegeEmailInput.trim().toLowerCase();
+    if (!collegeVerificationService.validateCgcEmail(trimmed)) {
+      setVerificationError('Email must strictly end in @cgcjhanjeri.in');
+      return;
+    }
+
+    setIsSendingLink(true);
+    const res = await collegeVerificationService.sendVerificationLink(trimmed);
+    setIsSendingLink(false);
+
+    if (res.success) {
+      setLinkSentEmail(trimmed);
+      setVerificationError(null);
+    } else {
+      setVerificationError(res.error || 'Failed to send verification link.');
+    }
+  };
+
+  const handleSkipVerification = () => {
+    collegeVerificationService.setDismissedByUser(true);
+    setIsSkipped(true);
+  };
+
+  const handleExpandVerification = () => {
+    collegeVerificationService.setDismissedByUser(false);
+    setIsSkipped(false);
+  };
+
+  const handleRefreshVerification = async () => {
+    setIsCheckingLink(true);
+    setVerificationError(null);
+    try {
+      if (authUser) {
+        await authUser.reload();
+        // If there is an active verification link in URL, complete it
+        if (collegeVerificationService.isIncomingVerificationLink()) {
+          const result = await collegeVerificationService.completeVerification();
+          if (result.success) {
+            setLinkSentEmail(null);
+          } else if (result.error) {
+            setVerificationError(result.error);
+          }
+        }
+      }
+    } catch (err: unknown) {
+      console.warn('Verification reload error:', err);
+    } finally {
+      setIsCheckingLink(false);
+    }
+  };
+
   const toggleInterest = (category: ActivityCategory) => {
     if (interests.includes(category)) {
-      setInterests(interests.filter((c) => c !== category));
+      setInterests((prev) => prev.filter((c) => c !== category));
+      setSkillLevels((prev) => {
+        const next = { ...prev };
+        delete next[category];
+        return next;
+      });
     } else {
-      setInterests([...interests, category]);
-      if (!skillLevels[category]) {
-        setSkillLevels({ ...skillLevels, [category]: 'Casual' });
+      setInterests((prev) => [...prev, category]);
+      const isSport = CATEGORIES_CONFIG.some((c) => c.category === category && c.group === 'sports');
+      if (isSport) {
+        setSkillLevels((prev) => ({
+          ...prev,
+          [category]: prev[category] || 'Casual',
+        }));
       }
     }
   };
+
+  const setSkill = (category: ActivityCategory, level: SkillLevel) => {
+    setSkillLevels((prev) => ({ ...prev, [category]: level }));
+  };
+
+  const selectedSports = interests.filter((i) =>
+    CATEGORIES_CONFIG.some((c) => c.category === i && c.group === 'sports')
+  );
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -77,26 +167,33 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         .substring(0, 2)
         .toUpperCase() || 'ST';
 
+    // Prune unselected sports from skillLevels to guarantee clean state
+    const cleanedSkillLevels: Partial<Record<ActivityCategory, SkillLevel>> = {};
+    interests.forEach((cat) => {
+      if (skillLevels[cat]) {
+        cleanedSkillLevels[cat] = skillLevels[cat];
+      }
+    });
+
     const updated: UserProfile = {
       ...profile,
       name: name.trim() || 'Campus Student',
-      college: college.trim() || 'University Campus',
       year,
       bio: bio.trim(),
       avatarInitials: initials,
       interests,
-      skillLevels,
+      skillLevels: cleanedSkillLevels,
       typicalAvailability,
       privacyPreferences,
       updatedAt: new Date().toISOString(),
     };
 
-    // Save to Firestore if real authenticated user
-    if (updated.id && !updated.isSampleUser) {
+    // Save to Firestore for authenticated user
+    if (updated.id) {
       try {
         await authService.saveUserProfile(updated);
       } catch (err) {
-        console.warn('Could not sync to Firestore, fallback to local storage:', err);
+        console.warn('Could not sync to Firestore:', err);
       }
     }
 
@@ -108,36 +205,18 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     setTimeout(() => setSavedSuccess(false), 2500);
   };
 
-  const handleReset = () => {
-    if (
-      confirm(
-        'Reset app data back to fresh sample seed activities, demo profile, and messages? This will clear local changes.'
-      )
-    ) {
-      onResetData();
-    }
-  };
-
   return (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6 pb-28 md:pb-12 space-y-6">
       {/* Profile Header Banner */}
       <section className="bg-white rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200/90 relative overflow-hidden">
         {/* Verification Status Pill */}
         <div className="mb-4 flex items-center justify-between flex-wrap gap-2">
-          {profile.isSampleUser ? (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 border border-amber-200 rounded-full text-xs text-amber-800 font-medium">
-              <span className="font-semibold">Sample Demo Profile</span>
-              <span aria-hidden="true">·</span>
-              <span>Stanford University (Guest)</span>
-            </div>
-          ) : (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 border border-emerald-200 rounded-full text-xs text-emerald-800 font-medium">
-              <CloudCheck className="w-3.5 h-3.5 text-emerald-600" />
-              <span className="font-semibold">Firebase Authenticated</span>
-              <span aria-hidden="true">·</span>
-              <span className="truncate max-w-[200px]">{profile.email || 'Google User'}</span>
-            </div>
-          )}
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 border border-emerald-200 rounded-full text-xs text-emerald-800 font-medium">
+            <CloudCheck className="w-3.5 h-3.5 text-emerald-600" />
+            <span className="font-semibold">Firebase Authenticated</span>
+            <span aria-hidden="true">·</span>
+            <span className="truncate max-w-[200px]">{profile.email || 'Google User'}</span>
+          </div>
 
           <button
             onClick={onSignOut}
@@ -163,12 +242,19 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 <h1 className="text-xl sm:text-2xl font-bold font-display text-[#3A0F34]">
                   {profile.name}
                 </h1>
-                <span className="text-[11px] bg-[#EAAA00]/20 text-[#240720] px-2 py-0.5 rounded-md font-bold">
-                  STUDENT
-                </span>
+                {verificationState.isVerified ? (
+                  <span className="text-[11px] bg-emerald-100 text-emerald-800 border border-emerald-300 px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1 shadow-xs">
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>VERIFIED CGC STUDENT</span>
+                  </span>
+                ) : (
+                  <span className="text-[11px] bg-[#EAAA00]/20 text-[#240720] px-2 py-0.5 rounded-md font-bold">
+                    STUDENT
+                  </span>
+                )}
               </div>
               <p className="text-xs sm:text-sm font-semibold text-slate-600 mt-0.5">
-                {profile.college} · {profile.year}
+                {profile.year}
               </p>
               <p className="text-xs text-slate-500 mt-2 max-w-md leading-relaxed">
                 {profile.bio || 'No campus bio added yet.'}
@@ -245,48 +331,36 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
             <div>
               <label className="block text-xs font-bold text-[#3A0F34] uppercase tracking-wider mb-1.5">
-                College Campus
+                Year of Study
               </label>
               <select
-                value={college}
-                onChange={(e) => setCollege(e.target.value)}
+                value={year}
+                onChange={(e) => setYear(e.target.value)}
                 className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#3A0F34]"
               >
-                {COLLEGES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
+                {year && !STUDY_YEAR_OPTIONS.includes(year as any) && (
+                  <option value={year}>{year} (Current)</option>
+                )}
+                {STUDY_YEAR_OPTIONS.map((opt) => (
+                  <option key={opt} value={opt}>
+                    {opt}
                   </option>
                 ))}
               </select>
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-bold text-[#3A0F34] uppercase tracking-wider mb-1.5">
-                Year of Study
-              </label>
-              <input
-                type="text"
-                value={year}
-                onChange={(e) => setYear(e.target.value)}
-                placeholder="e.g. Junior · Class of 2028"
-                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#3A0F34]"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-bold text-[#3A0F34] uppercase tracking-wider mb-1.5">
-                Bio
-              </label>
-              <textarea
-                value={bio}
-                onChange={(e) => setBio(e.target.value)}
-                rows={2}
-                placeholder="Share your interests, sport paces, or campus schedule..."
-                className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#3A0F34] resize-none"
-              />
-            </div>
+          <div>
+            <label className="block text-xs font-bold text-[#3A0F34] uppercase tracking-wider mb-1.5">
+              Bio
+            </label>
+            <textarea
+              value={bio}
+              onChange={(e) => setBio(e.target.value)}
+              rows={2}
+              placeholder="Share your interests, sport paces, or campus schedule..."
+              className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-[#3A0F34] resize-none"
+            />
           </div>
 
           {/* Interests in editing */}
@@ -314,6 +388,54 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 );
               })}
             </div>
+
+            {/* Dynamic sports skill level selectors in Edit Profile */}
+            {selectedSports.length > 0 && (
+              <div className="mt-4 pt-4 border-t border-slate-100">
+                <div className="flex items-center justify-between mb-2">
+                  <label className="block text-xs font-bold text-[#3A0F34] uppercase tracking-wider">
+                    Sports Skill Level (for fair matches)
+                  </label>
+                  <span className="text-[11px] font-medium text-slate-500">
+                    {selectedSports.length} {selectedSports.length === 1 ? 'sport' : 'sports'} selected
+                  </span>
+                </div>
+                <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                  {selectedSports.map((sport) => {
+                    const icon = CATEGORIES_CONFIG.find((c) => c.category === sport)?.icon;
+                    return (
+                      <div
+                        key={sport}
+                        className="flex flex-col sm:flex-row sm:items-center justify-between gap-1.5 p-2.5 bg-slate-50 rounded-xl border border-slate-200 text-xs"
+                      >
+                        <span className="font-semibold text-slate-800 flex items-center gap-1.5">
+                          <span className="text-base">{icon}</span>
+                          <span>{sport}</span>
+                        </span>
+                        <div className="flex gap-1 flex-wrap">
+                          {(['Beginner', 'Intermediate', 'Advanced', 'Casual'] as SkillLevel[]).map(
+                            (lvl) => (
+                              <button
+                                key={lvl}
+                                type="button"
+                                onClick={() => setSkill(sport, lvl)}
+                                className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                                  (skillLevels[sport] || 'Casual') === lvl
+                                    ? 'bg-[#EAAA00] text-[#240720] font-bold shadow-xs'
+                                    : 'bg-white text-slate-600 hover:bg-slate-200 border border-slate-200'
+                                }`}
+                              >
+                                {lvl}
+                              </button>
+                            )
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Availability in editing */}
@@ -370,6 +492,203 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
       ) : (
         /* View Mode Sections */
         <>
+          {/* Optional CGC College Verification Section */}
+          {verificationState.isVerified ? (
+            <section className="bg-emerald-50/80 border border-emerald-200/90 rounded-3xl p-6 shadow-xs space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-11 h-11 rounded-2xl bg-emerald-600 flex items-center justify-center text-white shadow-sm shrink-0">
+                    <ShieldCheck className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-sm font-bold text-emerald-950">Verified CGC Student</h2>
+                      <span className="text-[10px] font-bold bg-emerald-200/70 text-emerald-900 px-2 py-0.5 rounded-full">
+                        AUTHENTICATED
+                      </span>
+                    </div>
+                    <p className="text-xs text-emerald-700 mt-0.5 flex items-center gap-1.5 font-medium">
+                      <Mail className="w-3.5 h-3.5 text-emerald-600" />
+                      <span>{verificationState.collegeEmail}</span>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="text-[11px] text-emerald-800 bg-emerald-100/70 px-3 py-1.5 rounded-xl border border-emerald-200/50 self-start sm:self-auto font-medium">
+                  Google UID Preserved · Ownership Confirmed
+                </div>
+              </div>
+              <p className="text-xs text-emerald-800/80 leading-relaxed pt-2 border-t border-emerald-200/60">
+                Your campus email ownership has been verified directly via Firebase Auth. Your primary Google login and all VibeMatch activities remain intact.
+              </p>
+            </section>
+          ) : isSkipped ? (
+            <section className="bg-slate-50 border border-slate-200 rounded-3xl p-4 sm:p-5 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-slate-200 flex items-center justify-center text-slate-600 shrink-0">
+                  <Shield className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-[#3A0F34]">CGC College Verification</span>
+                    <span className="text-[10px] bg-slate-200 text-slate-700 font-semibold px-2 py-0.5 rounded-full">
+                      Optional
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-slate-500">
+                    Skipped for now — all VibeMatch features remain fully accessible.
+                  </span>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleExpandVerification}
+                className="py-1.5 px-3 rounded-xl text-xs font-bold text-[#3A0F34] bg-white hover:bg-slate-100 border border-slate-300 transition-colors shrink-0"
+              >
+                Verify Now
+              </button>
+            </section>
+          ) : (
+            <section className="bg-white border border-slate-200/90 rounded-3xl p-6 shadow-xs space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-11 h-11 rounded-2xl bg-[#3A0F34] flex items-center justify-center text-white shadow-xs shrink-0">
+                    <Shield className="w-5 h-5 text-[#EAAA00]" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h2 className="text-sm font-bold text-[#3A0F34]">Verify CGC College Email</h2>
+                      <span className="text-[10px] font-bold bg-[#EAAA00]/20 text-[#240720] px-2 py-0.5 rounded-full">
+                        Optional
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      Confirm official enrollment with your @cgcjhanjeri.in address.
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleSkipVerification}
+                  className="text-xs font-medium text-slate-400 hover:text-slate-600 px-2 py-1 transition-colors"
+                >
+                  Skip for Now
+                </button>
+              </div>
+
+              {linkSentEmail ? (
+                <div className="p-4 bg-amber-50/90 border border-amber-200 rounded-2xl space-y-3">
+                  <div className="flex items-start gap-2.5">
+                    <Mail className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+                    <div className="space-y-1 text-xs text-amber-950">
+                      <span className="font-bold block">Verification Link Dispatched</span>
+                      <p className="leading-relaxed">
+                        We sent a genuine Firebase sign-in verification link to{' '}
+                        <strong className="font-semibold text-amber-950">{linkSentEmail}</strong>.
+                        Open the email in your college inbox and click the link to confirm ownership.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-amber-200/60">
+                    <button
+                      type="button"
+                      onClick={handleRefreshVerification}
+                      disabled={isCheckingLink}
+                      className="py-1.5 px-3.5 rounded-xl text-xs font-bold bg-amber-700 hover:bg-amber-800 text-white flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                    >
+                      <RotateCcw className={`w-3.5 h-3.5 ${isCheckingLink ? 'animate-spin' : ''}`} />
+                      <span>{isCheckingLink ? 'Checking...' : "I've Clicked the Link"}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLinkSentEmail(null);
+                        setVerificationError(null);
+                      }}
+                      className="py-1.5 px-3 rounded-xl text-xs font-semibold text-amber-900 hover:bg-amber-100 transition-colors"
+                    >
+                      Use Different Email
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSkipVerification}
+                      className="py-1.5 px-3 rounded-xl text-xs font-medium text-slate-500 hover:text-slate-700 ml-auto transition-colors"
+                    >
+                      Skip for Now
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={handleSendVerification} className="space-y-3">
+                  <div>
+                    <label className="block text-xs font-bold text-[#3A0F34] uppercase tracking-wider mb-1.5">
+                      CGC Campus Email Address
+                    </label>
+                    <input
+                      type="email"
+                      value={collegeEmailInput}
+                      onChange={(e) => {
+                        setCollegeEmailInput(e.target.value);
+                        setVerificationError(null);
+                      }}
+                      placeholder="e.g. rollno.student@cgcjhanjeri.in"
+                      className="w-full text-xs px-3.5 py-2.5 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-[#3A0F34]/20 focus:border-[#3A0F34]"
+                    />
+                    <div className="flex items-center justify-between mt-1.5">
+                      <span className="text-[11px] text-slate-500">
+                        Must end in <strong className="text-slate-700">@cgcjhanjeri.in</strong>
+                      </span>
+                      {collegeEmailInput && (
+                        <span
+                          className={`text-[11px] font-semibold ${
+                            collegeVerificationService.validateCgcEmail(collegeEmailInput)
+                              ? 'text-emerald-600'
+                              : 'text-amber-600'
+                          }`}
+                        >
+                          {collegeVerificationService.validateCgcEmail(collegeEmailInput)
+                            ? 'Valid CGC domain'
+                            : 'Must end in @cgcjhanjeri.in'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {verificationError && (
+                    <div className="p-3 bg-red-50 border border-red-200 text-red-800 rounded-xl text-xs flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                      <span>{verificationError}</span>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      type="button"
+                      onClick={handleSkipVerification}
+                      className="text-xs font-medium text-slate-500 hover:text-slate-700 transition-colors"
+                    >
+                      Skip for Now
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={isSendingLink || !collegeVerificationService.validateCgcEmail(collegeEmailInput)}
+                      className="py-2 px-4 rounded-xl text-xs font-bold bg-[#3A0F34] hover:bg-[#52184A] text-white shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:pointer-events-none"
+                    >
+                      <Mail className="w-3.5 h-3.5" />
+                      <span>{isSendingLink ? 'Sending Link...' : 'Send Verification Link'}</span>
+                    </button>
+                  </div>
+
+                  <div className="pt-2 border-t border-slate-100 text-[11px] text-slate-400 leading-relaxed">
+                    <strong>Note:</strong> Verification does not change your Google login or account UID. Unverified students retain complete access to all app features.
+                  </div>
+                </form>
+              )}
+            </section>
+          )}
+
           {/* Interests & Skill levels card */}
           <section className="bg-white rounded-3xl p-6 border border-slate-200/90 shadow-xs space-y-4">
             <div className="flex items-center justify-between">
@@ -446,7 +765,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                     setPrivacyPreferences(updated);
                     const newProf = { ...profile, privacyPreferences: updated };
                     storageService.saveProfile(newProf);
-                    if (newProf.id && !newProf.isSampleUser) {
+                    if (newProf.id) {
                       authService.saveUserProfile(newProf);
                     }
                     onProfileUpdated(newProf);
@@ -475,7 +794,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                     setPrivacyPreferences(updated);
                     const newProf = { ...profile, privacyPreferences: updated };
                     storageService.saveProfile(newProf);
-                    if (newProf.id && !newProf.isSampleUser) {
+                    if (newProf.id) {
                       authService.saveUserProfile(newProf);
                     }
                     onProfileUpdated(newProf);
@@ -487,10 +806,10 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               <label className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
                 <div>
                   <span className="text-xs font-bold text-[#3A0F34] block">
-                    Allow spontaneous &quot;Wave&quot; notifications
+                    Allow spontaneous meetup invites
                   </span>
                   <span className="text-[11px] text-slate-500">
-                    Permit campus peers to wave when you broadcast Free Right Now.
+                    Permit campus peers to invite you when you broadcast Free Right Now.
                   </span>
                 </div>
                 <input
@@ -504,7 +823,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                     setPrivacyPreferences(updated);
                     const newProf = { ...profile, privacyPreferences: updated };
                     storageService.saveProfile(newProf);
-                    if (newProf.id && !newProf.isSampleUser) {
+                    if (newProf.id) {
                       authService.saveUserProfile(newProf);
                     }
                     onProfileUpdated(newProf);
@@ -515,28 +834,16 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
             </div>
           </section>
 
-          {/* Reset & Safety Information Card */}
+          {/* Safety & Integrity Transparency Card */}
           <section className="bg-slate-100 rounded-3xl p-6 border border-slate-200 space-y-4">
             <div className="flex items-start gap-3">
               <Shield className="w-5 h-5 text-[#3A0F34] shrink-0 mt-0.5" />
               <div className="space-y-1 text-xs text-slate-600 leading-relaxed">
                 <span className="font-bold text-[#3A0F34] block">Safety & Integrity Transparency</span>
                 <p>
-                  VibeMatch uses named public campus venues. College name is self-reported by students and is not a formal registrar verification. User profiles are secured in Firestore with strict user-level authorization rules.
+                  VibeMatch uses named public campus venues. CGC college-email verification is planned as a future requirement; ordinary Google Sign-In currently enables testing and community access without proving official CGC enrollment. User profiles are secured in Firestore with strict user-level authorization rules.
                 </p>
               </div>
-            </div>
-
-            <div className="pt-3 border-t border-slate-200 flex items-center justify-between flex-wrap gap-3">
-              <span className="text-xs text-slate-500">Testing data or need to reset?</span>
-              <button
-                type="button"
-                onClick={handleReset}
-                className="py-2 px-4 rounded-xl text-xs font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 transition-colors flex items-center gap-1.5"
-              >
-                <RotateCcw className="w-3.5 h-3.5" />
-                <span>Reset to Sample Seed Data</span>
-              </button>
             </div>
           </section>
         </>

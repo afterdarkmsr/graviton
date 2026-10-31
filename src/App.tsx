@@ -5,11 +5,14 @@
 
 import React, { useState, useEffect } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
-import { auth, testConnection } from './lib/firebase';
+import { auth } from './lib/firebase';
 import { authService } from './services/authService';
-import { ActiveTab, Activity, ActivityCategory, SkillLevel, UserProfile } from './types';
+import { activityFirestoreService } from './services/activityService';
+import { matchRequestService } from './services/matchRequestService';
+import { ActiveTab, Activity, ActivityCategory, MatchRequest, SkillLevel, UserProfile } from './types';
 import { storageService } from './services/storageService';
-import { DEFAULT_DEMO_USER } from './data/seedData';
+import { collegeVerificationService } from './services/collegeVerificationService';
+
 import { Navbar } from './components/Navbar';
 import { RescueMeModal } from './components/RescueMeModal';
 import { WelcomeScreen } from './screens/WelcomeScreen';
@@ -25,10 +28,9 @@ import { CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 export default function App() {
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
-  const [profile, setProfile] = useState<UserProfile>(() => {
-    return storageService.getProfile() || DEFAULT_DEMO_USER;
-  });
-  const [activities, setActivities] = useState<Activity[]>(() => storageService.getActivities());
+  const [profile, setProfile] = useState<UserProfile | null>(() => storageService.getProfile());
+  const [activities, setActivities] = useState<Activity[]>([]);
+  const [incomingMatchRequests, setIncomingMatchRequests] = useState<MatchRequest[]>([]);
 
   // Views: 'welcome' | 'onboarding' | 'main'
   const [currentView, setCurrentView] = useState<'welcome' | 'onboarding' | 'main'>('welcome');
@@ -48,21 +50,117 @@ export default function App() {
   );
 
   const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
-    setToast({ message, type });
+    let cleanMsg = message;
+    try {
+      const parsed = JSON.parse(message);
+      if (parsed?.error) cleanMsg = parsed.error;
+    } catch {
+      // not JSON
+    }
+    setToast({ message: cleanMsg, type });
     setTimeout(() => {
       setToast(null);
-    }, 3500);
+    }, 4500);
   };
 
-  // Sync activities and local state
-  const syncData = () => {
-    setActivities(storageService.getActivities());
-  };
-
-  // Initial connection test
+  // Real-time Firestore Activities Listener (cleaned up on unmount or sign-out)
   useEffect(() => {
-    testConnection();
-  }, []);
+    if (!authUser) {
+      setActivities([]);
+      return;
+    }
+
+    const unsubscribe = activityFirestoreService.subscribeToActivities(
+      (cloudActivities) => {
+        setActivities(cloudActivities);
+      },
+      (err) => {
+        console.warn('Real-time activities subscription warning:', err);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [authUser]);
+
+  // Real-time Incoming Match Requests Listener for Navbar Notification Badge
+  useEffect(() => {
+    if (!authUser) {
+      setIncomingMatchRequests([]);
+      return;
+    }
+
+    const unsubscribe = matchRequestService.subscribeIncomingRequests(
+      authUser.uid,
+      (reqs) => {
+        setIncomingMatchRequests(reqs);
+      },
+      (err) => {
+        console.warn('Incoming match requests subscription warning:', err);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [authUser]);
+
+  // Real-time Outgoing Match Requests Listener for Requester Direct Chat Navigation
+  useEffect(() => {
+    if (!authUser) return;
+
+    const unsubscribe = matchRequestService.subscribeOutgoingRequests(
+      authUser.uid,
+      (reqs) => {
+        const accepted = reqs.find((r) => r.status === 'accepted' && r.activityId);
+        if (accepted && accepted.activityId) {
+          const navKey = `navigated_match_${accepted.id}`;
+          if (!sessionStorage.getItem(navKey)) {
+            sessionStorage.setItem(navKey, 'true');
+            showToast('Match request accepted! Entering Squad Chat...', 'success');
+            setSelectedActivityId(accepted.activityId);
+          }
+        }
+      },
+      (err) => {
+        console.warn('Outgoing match requests subscription notice:', err);
+      }
+    );
+
+    return () => {
+      unsubscribe();
+    };
+  }, [authUser]);
+
+
+  // Safe CGC Email Verification Link Handler
+  // Never creates a duplicate account - strictly links credential to active authUser
+  useEffect(() => {
+    if (!collegeVerificationService.isIncomingVerificationLink()) return;
+
+    if (!authUser) {
+      showToast('Please sign in with your primary Google account first to complete college verification.', 'info');
+      return;
+    }
+
+    collegeVerificationService.completeVerification().then(async (result) => {
+      if (result.success) {
+        showToast(`CGC college email verified: ${result.linkedEmail}`, 'success');
+        try {
+          await authUser.reload();
+          setAuthUser({ ...auth.currentUser! });
+        } catch (e) {
+          console.warn('Auth reload warning:', e);
+        }
+        setActiveTab('profile');
+      } else if (result.code === 'NEED_LOGIN') {
+        showToast(result.error || 'Please sign in first.', 'info');
+      } else if (result.error) {
+        showToast(result.error, 'error');
+      }
+    });
+  }, [authUser]);
 
   // Firebase Auth State Listener
   useEffect(() => {
@@ -80,6 +178,11 @@ export default function App() {
             storageService.saveProfile(firestoreProfile);
             storageService.setOnboarded(true);
             setCurrentView('main');
+
+            // Ensure public profile exists in /publicProfiles/{uid} for squad badges & chat
+            authService.saveUserProfile(firestoreProfile).catch((err) => {
+              console.warn('Public profile sync warning:', err);
+            });
           } else {
             // New user or incomplete onboarding
             const initials =
@@ -97,8 +200,7 @@ export default function App() {
               userId: firebaseUser.uid,
               email: firebaseUser.email || '',
               name: firebaseUser.displayName || 'Campus Student',
-              college: 'Stanford University', // default placeholder for picker
-              year: 'Sophomore',
+              year: '1st Year',
               bio: '',
               avatarColor: '#3A0F34',
               avatarInitials: initials,
@@ -122,7 +224,6 @@ export default function App() {
           }
         } catch (err) {
           console.error('Failed to retrieve user profile from Firestore:', err);
-          // If Firestore fails, check local cache
           const cached = storageService.getProfile();
           if (cached && cached.id === firebaseUser.uid) {
             setProfile(cached);
@@ -133,14 +234,8 @@ export default function App() {
         }
       } else {
         // Not authenticated
-        const cached = storageService.getProfile();
-        if (cached && cached.isSampleUser && storageService.isOnboarded()) {
-          // User chose guest demo exploration
-          setProfile(cached);
-          setCurrentView('main');
-        } else {
-          setCurrentView('welcome');
-        }
+        setProfile(null);
+        setCurrentView('welcome');
       }
 
       setIsAuthChecking(false);
@@ -150,28 +245,24 @@ export default function App() {
   }, []);
 
   // Compute joined activities count for badge
-  const joinedCount = activities.filter(
-    (act) =>
-      act.participantIds.includes(profile.id) &&
-      act.hostId !== profile.id &&
-      act.status !== 'cancelled'
-  ).length;
+  const joinedCount = profile
+    ? activities.filter(
+        (act) =>
+          act.participantIds.includes(profile.id) &&
+          act.hostId !== profile.id &&
+          act.status !== 'cancelled'
+      ).length
+    : 0;
 
-  const hostedCount = activities.filter(
-    (act) => act.hostId === profile.id && act.status !== 'cancelled'
-  ).length;
+  const hostedCount = profile
+    ? activities.filter(
+        (act) => act.hostId === profile.id && act.status !== 'cancelled'
+      ).length
+    : 0;
 
   // Handlers
   const handleGoogleSignInSuccess = async (user: User) => {
     showToast(`Signed in with Google as ${user.email}! Loading profile...`, 'info');
-  };
-
-  const handleExploreDemo = () => {
-    storageService.saveProfile(DEFAULT_DEMO_USER);
-    storageService.setOnboarded(true);
-    setProfile(DEFAULT_DEMO_USER);
-    setCurrentView('main');
-    showToast('Viewing sample Stanford campus activities as Guest Student Alex Chen.', 'info');
   };
 
   const handleOnboardingComplete = async (updatedProfile: UserProfile) => {
@@ -185,7 +276,7 @@ export default function App() {
         showToast('Profile saved locally. Cloud sync pending.', 'info');
       }
     } else {
-      showToast(`Profile ready! Welcome to ${updatedProfile.college}.`);
+      showToast('Profile ready! Welcome to VibeMatch.');
     }
 
     storageService.saveProfile(updatedProfile);
@@ -200,6 +291,7 @@ export default function App() {
     if (res.success) {
       storageService.clearAuthProfile();
       setAuthUser(null);
+      setProfile(null);
       setCurrentView('welcome');
       showToast('Signed out of VibeMatch.', 'info');
     } else {
@@ -211,17 +303,35 @@ export default function App() {
     setSelectedActivityId(activity.id);
   };
 
-  const handleJoinActivity = (activityId: string) => {
-    const res = storageService.joinActivity(activityId, profile);
-    if (res.success) {
-      showToast('You joined this squad! Open squad chat to coordinate.');
-      syncData();
-    } else {
-      showToast(res.error || 'Could not join activity.', 'error');
+  const handleJoinActivity = async (activityId: string) => {
+    if (!profile) return;
+    const act = activities.find((a) => a.id === activityId);
+    if (!act) return;
+
+    try {
+      showToast('Securing your spot...', 'info');
+      await activityFirestoreService.joinActivity(activityId, profile);
+      showToast('You joined this squad! Welcome to the Squad Chat.', 'success');
+      // Automatically open the existing Squad Chat / Activity Details screen
+      setSelectedActivityId(activityId);
+    } catch (err: unknown) {
+      const errorObj = err as Error;
+      let msg = errorObj?.message || 'Could not join activity.';
+      if (msg.includes('Missing or insufficient permissions') || msg.includes('PERMISSION_DENIED')) {
+        msg = 'Unable to join: Cloud Firestore security rules must be reviewed and deployed for join actions.';
+      } else {
+        try {
+          const parsed = JSON.parse(msg);
+          if (parsed?.error) msg = parsed.error;
+        } catch {
+          // Keep raw message
+        }
+      }
+      showToast(msg, 'error');
     }
   };
 
-  const handleCreateActivitySubmit = (data: {
+  const handleCreateActivitySubmit = async (data: {
     title: string;
     category: ActivityCategory;
     categoryGroup: 'sports' | 'social' | 'study';
@@ -233,11 +343,14 @@ export default function App() {
     maxParticipants: number;
     skillLevel: SkillLevel;
   }) => {
-    const created = storageService.createActivity(data, profile);
-    syncData();
+    if (!profile || !authUser) {
+      showToast('You must be signed in to create an activity.', 'error');
+      return;
+    }
+    const created = await activityFirestoreService.createActivity(data, profile);
     setSelectedActivityId(created.id);
     setActiveTab('discover');
-    showToast(`"${created.title}" published! You are set as host.`);
+    showToast(`"${created.title}" published to Cloud Firestore! You are set as host.`);
   };
 
   const handleCreateWithStudent = (suggestedNote: string, venueHint: string) => {
@@ -246,24 +359,15 @@ export default function App() {
     setActiveTab('create');
   };
 
-  const handleResetData = () => {
-    storageService.resetToSeedData();
-    setProfile(DEFAULT_DEMO_USER);
-    setActivities(storageService.getActivities());
-    setSelectedActivityId(null);
-    setActiveTab('discover');
-    showToast('App reset to initial sample seed activities and messages.');
-  };
-
   // Auth checking loading indicator
   if (isAuthChecking) {
     return (
-      <div className="min-h-screen bg-[#DDE3E8] flex flex-col items-center justify-center p-6 text-[#3A0F34]">
-        <div className="w-12 h-12 rounded-2xl bg-[#3A0F34] flex items-center justify-center text-[#EAAA00] mb-4 shadow-lg">
+      <div className="min-h-screen bg-[#DDE3E8] dark:bg-[#0A0E17] flex flex-col items-center justify-center p-6 text-[#3A0F34] dark:text-slate-100 transition-colors">
+        <div className="w-12 h-12 rounded-2xl bg-[#3A0F34] dark:bg-purple-950 flex items-center justify-center text-[#EAAA00] mb-4 shadow-lg border border-transparent dark:border-purple-800/40">
           <Loader2 className="w-6 h-6 animate-spin" />
         </div>
-        <h2 className="text-xl font-bold font-display">VibeMatch</h2>
-        <p className="text-xs text-slate-500 mt-1">Connecting to Firebase Authentication...</p>
+        <h2 className="text-xl font-bold font-display text-[#3A0F34] dark:text-white">VibeMatch</h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Connecting to Firebase Authentication...</p>
       </div>
     );
   }
@@ -273,15 +377,38 @@ export default function App() {
     return (
       <WelcomeScreen
         onGoogleSignInSuccess={handleGoogleSignInSuccess}
-        onExploreDemo={handleExploreDemo}
       />
     );
   }
 
   if (currentView === 'onboarding') {
+    const fallbackProfile: UserProfile = profile || {
+      id: authUser?.uid || '',
+      userId: authUser?.uid || '',
+      email: authUser?.email || '',
+      name: authUser?.displayName || 'Campus Student',
+      year: '1st Year',
+      bio: '',
+      avatarColor: '#3A0F34',
+      avatarInitials: 'ST',
+      interests: ['Badminton', 'Coffee', 'Basketball'],
+      skillLevels: { Badminton: 'Intermediate', Basketball: 'Beginner' },
+      typicalAvailability: ['Afternoons (12PM - 5PM)', 'Evenings (5PM - 9PM)'],
+      privacyPreferences: {
+        showCollegeToCampusPeers: true,
+        onlyMatchCompatibleSkills: false,
+        allowDirectInvites: true,
+      },
+      freeUntil: null,
+      freeStatusNote: null,
+      isOnboarded: false,
+      isSampleUser: false,
+      createdAt: new Date().toISOString(),
+    };
+
     return (
       <OnboardingScreen
-        initialProfile={profile}
+        initialProfile={fallbackProfile}
         onComplete={handleOnboardingComplete}
         onCancel={() => {
           if (authUser) {
@@ -294,8 +421,20 @@ export default function App() {
     );
   }
 
+  if (!profile) {
+    return (
+      <div className="min-h-screen bg-[#DDE3E8] dark:bg-[#0A0E17] flex flex-col items-center justify-center p-6 text-[#3A0F34] dark:text-slate-100 transition-colors">
+        <div className="w-12 h-12 rounded-2xl bg-[#3A0F34] dark:bg-purple-950 flex items-center justify-center text-[#EAAA00] mb-4 shadow-lg border border-transparent dark:border-purple-800/40">
+          <Loader2 className="w-6 h-6 animate-spin" />
+        </div>
+        <h2 className="text-xl font-bold font-display text-[#3A0F34] dark:text-white">VibeMatch</h2>
+        <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Loading profile...</p>
+      </div>
+    );
+  }
+
   return (
-    <div className="min-h-screen bg-[#DDE3E8] flex flex-col selection:bg-[#EAAA00]/40 selection:text-[#3A0F34]">
+    <div className="min-h-screen bg-[#DDE3E8] dark:bg-[#0A0E17] text-[#3A0F34] dark:text-slate-100 flex flex-col selection:bg-[#EAAA00]/40 selection:text-[#3A0F34] dark:selection:text-[#EAAA00] transition-colors">
       {/* Top Header & Mobile Bottom Nav */}
       <Navbar
         currentTab={activeTab}
@@ -306,6 +445,7 @@ export default function App() {
         profile={profile}
         joinedCount={joinedCount}
         onOpenRescueModal={() => setIsRescueModalOpen(true)}
+        incomingMatchRequestsCount={incomingMatchRequests.length}
       />
 
       {/* Toast Notification Banner */}
@@ -350,8 +490,9 @@ export default function App() {
           <ActivityDetailScreen
             activityId={selectedActivityId}
             currentUser={profile}
+            activities={activities}
             onBack={() => setSelectedActivityId(null)}
-            onActivityUpdated={syncData}
+            onActivityUpdated={() => {}}
           />
         ) : activeTab === 'discover' ? (
           <DiscoverScreen
@@ -366,13 +507,14 @@ export default function App() {
           <FreeNowScreen
             currentUser={profile}
             activities={activities}
+            onToast={showToast}
             onProfileUpdated={() => {
               const updated = storageService.getProfile();
               if (updated) setProfile(updated);
-              syncData();
             }}
             onCreateActivityWithStudent={handleCreateWithStudent}
             onSelectActivity={handleSelectActivity}
+            onSelectActivityId={(id) => setSelectedActivityId(id)}
           />
         ) : activeTab === 'create' ? (
           <CreateActivityScreen
@@ -393,19 +535,18 @@ export default function App() {
             currentUser={profile}
             onSelectActivity={handleSelectActivity}
             onExplore={() => setActiveTab('discover')}
-            onActivityUpdated={syncData}
+            onActivityUpdated={() => {}}
           />
         ) : (
           <ProfileScreen
             profile={profile}
+            authUser={authUser}
             joinedCount={joinedCount}
             hostedCount={hostedCount}
             onProfileUpdated={(up) => {
               setProfile(up);
               storageService.saveProfile(up);
-              syncData();
             }}
-            onResetData={handleResetData}
             onSignOut={handleSignOut}
           />
         )}

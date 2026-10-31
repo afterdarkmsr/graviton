@@ -34,11 +34,6 @@ export class MatchService {
         return false;
       }
 
-      // If strict campus
-      if (options.strictCampus && act.campus.toLowerCase() !== profile.college.toLowerCase()) {
-        return false;
-      }
-
       // If onlyImmediate (e.g. for "Rescue Me From Boredom"), within next 12 hours
       if (options.onlyImmediate) {
         const hoursAhead = (actTime - now) / (1000 * 60 * 60);
@@ -57,14 +52,9 @@ export class MatchService {
       const actTime = new Date(act.dateTime).getTime();
       const hoursUntil = (actTime - now) / (1000 * 60 * 60);
 
-      // 1. Campus Match (+35 pts)
-      const isSameCampus = act.campus.toLowerCase() === profile.college.toLowerCase();
-      if (isSameCampus) {
-        score += 35;
-        matchReasons.push(`On your campus (${act.campus})`);
-      } else {
-        matchReasons.push(`Nearby partner campus (${act.campus})`);
-      }
+      // 1. Community Activity (+30 pts)
+      score += 30;
+      matchReasons.push('CGC student community activity');
 
       // 2. Interest Match (+25 pts)
       const userInterests = profile.interests || [];

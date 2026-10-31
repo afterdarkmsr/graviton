@@ -12,8 +12,24 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+      (function() {
+        try {
+          var saved = localStorage.getItem('vibematch_theme');
+          var prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var shouldBeDark = saved === 'dark' || ((!saved || saved === 'system') && prefersDark);
+          if (shouldBeDark) {
+            document.documentElement.classList.add('dark');
+            document.documentElement.style.colorScheme = 'dark';
+          } else {
+            document.documentElement.classList.remove('dark');
+            document.documentElement.style.colorScheme = 'light';
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
-  <body class="bg-[#DDE3E8] text-[#3A0F34] antialiased selection:bg-[#EAAA00]/30 selection:text-[#3A0F34]">
+  <body class="bg-[#DDE3E8] text-[#3A0F34] dark:bg-[#0A0E17] dark:text-slate-100 antialiased selection:bg-[#EAAA00]/30 selection:text-[#3A0F34] dark:selection:text-[#EAAA00]">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

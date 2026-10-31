@@ -104,7 +104,7 @@ export const ReportModal: React.FC<ReportModalProps> = ({
 
               {/* Required transparency disclaimer */}
               <div className="p-3 bg-amber-50 rounded-xl border border-amber-200/80 text-[11px] text-amber-900 leading-relaxed">
-                <strong>Safety Notice:</strong> Campus safety moderation is running in local demonstration mode. Serious emergencies should always be reported to your university campus police or emergency services immediately.
+                <strong>Safety Notice:</strong> Reports are logged for campus safety review. Urgent emergencies should always be reported directly to university campus security or emergency services immediately.
               </div>
 
               <div className="pt-2 flex items-center justify-end gap-2">

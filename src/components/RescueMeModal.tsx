@@ -70,7 +70,7 @@ export const RescueMeModal: React.FC<RescueMeModalProps> = ({
           <div className="mt-4 flex items-center gap-2 text-xs text-[#DDE3E8]/90 bg-white/10 px-3 py-1.5 rounded-xl">
             <span className="font-semibold text-[#EAAA00]">Matched for {profile.name}</span>
             <span>·</span>
-            <span>{profile.college}</span>
+            <span>{profile.year}</span>
             <span>·</span>
             <span>Deterministic compatibility</span>
           </div>
@@ -88,7 +88,7 @@ export const RescueMeModal: React.FC<RescueMeModalProps> = ({
                       Top Match · {topMatch.score}% Compatibility
                     </span>
                     <span className="text-xs text-slate-500">
-                      {topMatch.activity.isDemo && 'DEMO · '} {topMatch.activity.category}
+                      {topMatch.activity.category}
                     </span>
                   </div>
 

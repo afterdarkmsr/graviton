@@ -67,12 +67,68 @@
         }
       },
       "required": ["userId", "name", "college", "isOnboarded"]
+    },
+    "Activity": {
+      "title": "Activity",
+      "description": "Campus activity or sports squad created by students",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "maxLength": 150 },
+        "category": { "type": "string", "maxLength": 50 },
+        "categoryGroup": { "type": "string", "maxLength": 20 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "venue": { "type": "string", "maxLength": 150 },
+        "dateTime": { "type": "string", "maxLength": 50 },
+        "durationMinutes": { "type": "number" },
+        "maxParticipants": { "type": "number" },
+        "skillLevel": { "type": "string", "maxLength": 50 },
+        "createdBy": { "type": "string", "description": "Creator student Firebase UID" },
+        "hostName": { "type": "string", "maxLength": 100 },
+        "hostAvatarColor": { "type": "string", "maxLength": 20 },
+        "hostAvatarInitials": { "type": "string", "maxLength": 5 },
+        "participantIds": { "type": "array", "description": "List of participant student UIDs" },
+        "status": { "type": "string", "enum": ["active", "open", "full", "completed", "cancelled"] },
+        "isOneToOne": { "type": "boolean", "description": "Whether this is a 1-to-1 Who's Free match" },
+        "matchRequestId": { "type": "string", "description": "Associated MatchRequest document ID" },
+        "requesterUid": { "type": "string", "description": "Requester student UID for 1-to-1 match" },
+        "requesterName": { "type": "string", "maxLength": 100 },
+        "endedAt": { "type": "string" },
+        "endedByUid": { "type": "string" },
+        "originalBroadcastExpiresAt": { "type": "number" },
+        "createdAt": { "type": "string", "description": "Creation timestamp" }
+      },
+      "required": ["title", "category", "venue", "maxParticipants", "createdBy", "hostName", "participantIds", "status"]
+    },
+    "MatchRequest": {
+      "title": "MatchRequest",
+      "description": "1-to-1 match request between students in Who's Free",
+      "type": "object",
+      "properties": {
+        "hostUid": { "type": "string", "description": "Target host student UID" },
+        "requesterUid": { "type": "string", "description": "Student requesting the match" },
+        "status": { "type": "string", "enum": ["pending", "declined", "cancelled", "accepted", "ended"] },
+        "activityInterest": { "type": "string", "maxLength": 100 },
+        "requesterName": { "type": "string", "maxLength": 100 },
+        "requesterYear": { "type": "string", "maxLength": 50 },
+        "activityId": { "type": "string", "description": "Linked 1-to-1 Squad Activity ID" },
+        "createdAt": { "type": "string", "description": "Creation server timestamp" },
+        "updatedAt": { "type": "string", "description": "Update server timestamp" }
+      },
+      "required": ["hostUid", "requesterUid", "status", "activityInterest", "requesterName"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "UserProfile",
       "description": "Stores user profile and campus identity keyed by authenticated UID"
+    },
+    "/activities/{activityId}": {
+      "schema": "Activity",
+      "description": "Stores campus activities and sports squads created by students"
+    },
+    "/matchRequests/{requestId}": {
+      "schema": "MatchRequest",
+      "description": "Stores 1-to-1 peer match requests between campus students"
     }
   }
 }

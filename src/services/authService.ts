@@ -73,13 +73,14 @@ export class AuthService {
       }
 
       const data = snapshot.data();
+      const existingCampus = data.campus || data.college;
       return {
         id: userId,
         userId: userId,
         email: data.email || '',
         name: data.name || '',
-        college: data.college || '',
-        year: data.year || 'Sophomore',
+        ...(existingCampus ? { campus: existingCampus, college: existingCampus } : {}),
+        year: data.year || '1st Year',
         bio: data.bio || '',
         avatarColor: data.avatarColor || '#3A0F34',
         avatarInitials: data.avatarInitials || 'ST',
@@ -110,11 +111,10 @@ export class AuthService {
     const userId = profile.id;
     const docPath = `users/${userId}`;
 
-    const profileData = {
+    const profileData: Record<string, any> = {
       userId: userId,
       email: profile.email || '',
       name: profile.name,
-      college: profile.college,
       year: profile.year,
       bio: profile.bio || '',
       avatarColor: profile.avatarColor || '#3A0F34',
@@ -130,12 +130,65 @@ export class AuthService {
       createdAt: profile.createdAt || new Date().toISOString(),
     };
 
+    if (profile.campus) {
+      profileData.campus = profile.campus;
+    }
+    if (profile.college) {
+      profileData.college = profile.college;
+    }
+
     try {
-      const docRef = doc(db, 'users', userId);
-      await setDoc(docRef, profileData, { merge: true });
+      // 1. Save private profile under /users/{userId} (Strictly accessible by owner only)
+      const userDocRef = doc(db, 'users', userId);
+      await setDoc(userDocRef, profileData, { merge: true });
+
+      // 2. Save minimal public profile under /publicProfiles/{userId} (Safe for campus peers to view)
+      const publicDocRef = doc(db, 'publicProfiles', userId);
+      const cleanDisplayName = (profile.name && profile.name.trim()) || 'Campus Student';
+      await setDoc(
+        publicDocRef,
+        {
+          userId: userId,
+          displayName: cleanDisplayName,
+          avatarColor: profile.avatarColor || '#3A0F34',
+          avatarInitials: profile.avatarInitials || 'ST',
+          updatedAt: new Date().toISOString(),
+        },
+        { merge: true }
+      );
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, docPath);
     }
+  }
+
+  /**
+   * Retrieves minimal public profile badges for student squad members
+   */
+  public async getPublicProfiles(
+    userIds: string[]
+  ): Promise<Record<string, { displayName: string; avatarColor: string; avatarInitials: string }>> {
+    const results: Record<string, { displayName: string; avatarColor: string; avatarInitials: string }> = {};
+    const validUids = userIds.filter((id) => id && typeof id === 'string' && /^[a-zA-Z0-9_\-]+$/.test(id));
+
+    await Promise.all(
+      validUids.map(async (uid) => {
+        try {
+          const snap = await getDoc(doc(db, 'publicProfiles', uid));
+          if (snap.exists()) {
+            const data = snap.data();
+            results[uid] = {
+              displayName: data.displayName || 'Campus Student',
+              avatarColor: data.avatarColor || '#3A0F34',
+              avatarInitials: data.avatarInitials || 'ST',
+            };
+          }
+        } catch {
+          // Graceful fallback to default initials
+        }
+      })
+    );
+
+    return results;
   }
 }
 

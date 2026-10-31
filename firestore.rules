@@ -2,11 +2,12 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Global Safety Net: Default Deny
+    // Global Safety Net: Default Deny for all unspecified paths
     match /{document=**} {
       allow read, write: if false;
     }
 
+    // Common Helper Functions
     function isSignedIn() {
       return request.auth != null;
     }
@@ -27,41 +28,472 @@ service cloud.firestore {
       return resource.data;
     }
 
+    // -------------------------------------------------------------
+    // USER PROFILES
+    // -------------------------------------------------------------
+
+    // Validates private user profile documents under /users/{userId}
     function isValidUserProfile(data, userId) {
       return data.userId == userId
         && data.userId == request.auth.uid
         && data.name is string && data.name.size() > 0 && data.name.size() <= 100
-        && data.college is string && data.college.size() > 0 && data.college.size() <= 120
+        && (!('college' in data) || (data.college is string && data.college.size() <= 120))
+        && (!('campus' in data) || (data.campus is string && data.campus.size() <= 120))
         && (!('bio' in data) || (data.bio is string && data.bio.size() <= 500))
         && (!('year' in data) || (data.year is string && data.year.size() <= 50))
         && (!('email' in data) || (data.email is string && data.email.size() <= 150))
         && (!('avatarColor' in data) || (data.avatarColor is string && data.avatarColor.size() <= 20))
         && (!('avatarInitials' in data) || (data.avatarInitials is string && data.avatarInitials.size() <= 5))
-        && (!('freeStatusNote' in data) || (data.freeStatusNote == null || (data.freeStatusNote is string && data.freeStatusNote.size() <= 200)))
-        && (!('freeUntil' in data) || (data.freeUntil == null || data.freeUntil is number))
-        && (!('isOnboarded' in data) || data.isOnboarded is bool);
+        && (!('freeStatusNote' in data) || data.freeStatusNote == null || (data.freeStatusNote is string && data.freeStatusNote.size() <= 200))
+        && (!('freeUntil' in data) || data.freeUntil == null || data.freeUntil is number)
+        && (!('isOnboarded' in data) || data.isOnboarded is bool)
+        && (!('interests' in data) || data.interests is list)
+        && (!('skillLevels' in data) || data.skillLevels is map)
+        && (!('typicalAvailability' in data) || data.typicalAvailability is list)
+        && (!('privacyPreferences' in data) || data.privacyPreferences is map)
+        && (!('createdAt' in data) || (data.createdAt is string && data.createdAt.size() <= 50))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
     }
 
-    // User Profiles Collection
-    match /users/{userId} {
-      // Authenticated users can read profiles (e.g., to see other students on campus)
-      // but only the owner can read their own full document or query
-      allow get: if isSignedIn() && isValidId(userId);
-      allow list: if isSignedIn();
+    // Validates minimal public student profile badges under /publicProfiles/{userId}
+    function isValidPublicProfile(data, userId) {
+      return data.userId == userId
+        && data.userId == request.auth.uid
+        && data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 100
+        && (!('avatarColor' in data) || (data.avatarColor is string && data.avatarColor.size() <= 20))
+        && (!('avatarInitials' in data) || (data.avatarInitials is string && data.avatarInitials.size() <= 5))
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 50));
+    }
 
-      // Users can only create their own profile document
+    // 1. Private User Profiles Collection: /users/{userId}
+    // STRICT PRIVACY: Read/write permitted strictly for the owning student.
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
       allow create: if isOwner(userId)
         && isValidId(userId)
         && isValidUserProfile(incoming(), userId);
 
-      // Users can only update their own profile document
       allow update: if isOwner(userId)
         && isValidId(userId)
         && isValidUserProfile(incoming(), userId)
         && incoming().userId == existing().userId;
 
-      // Users can delete only their own profile
       allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    // 2. Minimal Public Profiles Collection: /publicProfiles/{userId}
+    // Safe public representation: Contains only displayName, avatarColor, avatarInitials.
+    match /publicProfiles/{userId} {
+      allow get, list: if isSignedIn();
+
+      allow create, update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidPublicProfile(incoming(), userId);
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    // -------------------------------------------------------------
+    // ACTIVITIES COLLECTION: /activities/{activityId}
+    // Single Authoritative Membership Model on activity document.
+    // -------------------------------------------------------------
+
+    // Validates field types and constraints for an activity
+    function isValidActivityShape(data) {
+      return data.createdBy is string && data.createdBy.size() > 0
+        && data.title is string && data.title.size() >= 3 && data.title.size() <= 150
+        && data.category is string && data.category.size() <= 50
+        && (!('categoryGroup' in data) || (data.categoryGroup is string && data.categoryGroup.size() <= 20))
+        && (!('description' in data) || (data.description is string && data.description.size() <= 1000))
+        && data.venue is string && data.venue.size() >= 2 && data.venue.size() <= 150
+        && (!('dateTime' in data) || (data.dateTime is string && data.dateTime.size() <= 50))
+        && (!('durationMinutes' in data) || (data.durationMinutes is number && data.durationMinutes > 0))
+        && data.maxParticipants is int && data.maxParticipants >= 2 && data.maxParticipants <= 50
+        && (!('skillLevel' in data) || (data.skillLevel is string && data.skillLevel.size() <= 50))
+        && (!('campus' in data) || (data.campus is string && data.campus.size() <= 120))
+        && data.hostName is string && data.hostName.size() <= 100
+        && (!('hostCollege' in data) || (data.hostCollege is string && data.hostCollege.size() <= 120))
+        && (!('hostAvatarColor' in data) || (data.hostAvatarColor is string && data.hostAvatarColor.size() <= 20))
+        && (!('hostAvatarInitials' in data) || (data.hostAvatarInitials is string && data.hostAvatarInitials.size() <= 5))
+        && data.participantIds is list && data.participantIds.size() >= 1 && data.participantIds.size() <= 50
+        && (data.status == 'active' || data.status == 'full' || data.status == 'completed' || data.status == 'cancelled')
+        && (!('isOneToOne' in data) || data.isOneToOne is bool)
+        && (!('matchRequestId' in data) || (data.matchRequestId is string && data.matchRequestId.size() <= 128))
+        && (!('requesterUid' in data) || (data.requesterUid is string && data.requesterUid.size() <= 128))
+        && (!('requesterName' in data) || (data.requesterName is string && data.requesterName.size() <= 100))
+        && (!('endedAt' in data) || (data.endedAt is string && data.endedAt.size() <= 50))
+        && (!('endedByUid' in data) || (data.endedByUid is string && data.endedByUid.size() <= 128))
+        && (!('originalBroadcastExpiresAt' in data) || data.originalBroadcastExpiresAt is number)
+        && (!('createdAt' in data) || data.createdAt is timestamp || data.createdAt is string)
+        && (!('updatedAt' in data) || data.updatedAt is timestamp || data.updatedAt is string);
+    }
+
+    // 1. Validates strict initial activity creation
+    function isValidNewActivity(data, activityId) {
+      return isValidActivityShape(data)
+        // Creator must match the authenticated user
+        && data.createdBy == request.auth.uid
+        // Initial status must strictly be 'active'
+        && data.status == 'active'
+        && (
+          // Standard squad creation: creator only
+          data.participantIds == [request.auth.uid]
+          ||
+          // Who's Free 1-to-1 match: creator (host) plus matched requester
+          (
+            data.maxParticipants == 2
+            && data.participantIds.size() == 2
+            && data.participantIds[0] == request.auth.uid
+            && ('isOneToOne' in data && data.isOneToOne == true)
+            && ('matchRequestId' in data && data.matchRequestId is string)
+            && ('requesterUid' in data && data.requesterUid == data.participantIds[1])
+            // Cross-document transactional consistency: matchRequest must be accepted in the same transaction
+            && getAfter(/databases/$(database)/documents/matchRequests/$(data.matchRequestId)).data.status == 'accepted'
+            && getAfter(/databases/$(database)/documents/matchRequests/$(data.matchRequestId)).data.activityId == activityId
+            && getAfter(/databases/$(database)/documents/matchRequests/$(data.matchRequestId)).data.hostUid == request.auth.uid
+            && getAfter(/databases/$(database)/documents/matchRequests/$(data.matchRequestId)).data.requesterUid == data.requesterUid
+            // Cross-document transactional consistency: host availability broadcast must be deactivated in the same transaction
+            && getAfter(/databases/$(database)/documents/availabilityBroadcasts/$(request.auth.uid)).data.isActive == false
+          )
+        );
+    }
+
+    // 2. Validates restricted host edits and status transitions
+    function isValidHostUpdate() {
+      return isSignedIn()
+        // Caller must be the original creator
+        && existing().createdBy == request.auth.uid
+        && incoming().createdBy == existing().createdBy
+        // Host CANNOT alter the participant roster
+        && incoming().participantIds == existing().participantIds
+        // Host CANNOT reactivate cancelled or completed activities
+        && existing().status != 'cancelled'
+        && existing().status != 'completed'
+        // Capacity validation: must remain an integer between 2 and 50 and at least current enrollment
+        && incoming().maxParticipants is int
+        && incoming().maxParticipants >= 2
+        && incoming().maxParticipants <= 50
+        && incoming().maxParticipants >= existing().participantIds.size()
+        // Status consistency after host edits:
+        && (
+          // Host may transition to terminal states (cancelled or completed)
+          (incoming().status == 'cancelled' || incoming().status == 'completed')
+          ||
+          // If not cancelled/completed, status MUST strictly match current enrollment vs capacity
+          (incoming().status == (existing().participantIds.size() >= incoming().maxParticipants ? 'full' : 'active'))
+        )
+        // createdAt timestamp is immutable
+        && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt)
+        // Permitted editable fields only
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'description', 'venue', 'dateTime', 'durationMinutes',
+          'skillLevel', 'category', 'categoryGroup', 'campus', 'status',
+          'maxParticipants', 'updatedAt'
+        ])
+        && isValidActivityShape(incoming());
+    }
+
+    // 3. Validates atomic join actions by non-host students
+    function isJoinAction() {
+      return isSignedIn()
+        // Host cannot join as regular participant (already creator)
+        && request.auth.uid != existing().createdBy
+        // Must not already be enrolled in squad (prevents duplicate membership)
+        && !existing().participantIds.hasAny([request.auth.uid])
+        // Must include all existing participants plus caller's UID
+        && incoming().participantIds.hasAll(existing().participantIds)
+        && incoming().participantIds.hasAll([request.auth.uid])
+        // Strict atomic increment by exactly 1
+        && incoming().participantIds.size() == existing().participantIds.size() + 1
+        // Server-enforced capacity limit
+        && incoming().participantIds.size() <= existing().maxParticipants
+        // Activity must currently be 'active' (cannot join full, cancelled, or completed meetups)
+        && existing().status == 'active'
+        // Status transitions to 'full' if max capacity reached, otherwise remains 'active'
+        && incoming().status == (incoming().participantIds.size() >= existing().maxParticipants ? 'full' : 'active')
+        // CRITICAL: Caller can ONLY alter 'participantIds' and 'status'
+        && incoming().diff(existing()).affectedKeys().hasOnly(['participantIds', 'status'])
+        // Immutable ownership, venue, and scheduling fields
+        && incoming().createdBy == existing().createdBy
+        && incoming().title == existing().title
+        && incoming().venue == existing().venue
+        && incoming().dateTime == existing().dateTime
+        && incoming().maxParticipants == existing().maxParticipants;
+    }
+
+    // 4. Validates atomic leave actions by enrolled students
+    function isLeaveAction() {
+      return isSignedIn()
+        // Host CANNOT leave their own activity (must cancel instead)
+        && request.auth.uid != existing().createdBy
+        // Must currently be enrolled in participantIds
+        && existing().participantIds.hasAny([request.auth.uid])
+        // Must NOT be in incoming participantIds
+        && !incoming().participantIds.hasAny([request.auth.uid])
+        // Strict atomic decrement by exactly 1
+        && incoming().participantIds.size() == existing().participantIds.size() - 1
+        // Can only leave an active or full activity (blocks leaving cancelled or completed)
+        && (existing().status == 'active' || existing().status == 'full')
+        // Status transitions back to 'active' since a spot has reopened
+        && incoming().status == 'active'
+        // CRITICAL: Caller can ONLY alter 'participantIds' and 'status'
+        && incoming().diff(existing()).affectedKeys().hasOnly(['participantIds', 'status'])
+        // Immutable ownership, venue, and scheduling fields
+        && incoming().createdBy == existing().createdBy
+        && incoming().title == existing().title
+        && incoming().venue == existing().venue
+        && incoming().dateTime == existing().dateTime
+        && incoming().maxParticipants == existing().maxParticipants;
+    }
+
+    // 5. Validates ending a 1-to-1 match by enrolled host or requester
+    function isEndOneToOneAction() {
+      return isSignedIn()
+        && ('isOneToOne' in existing() && existing().isOneToOne == true)
+        && existing().participantIds.hasAny([request.auth.uid])
+        && (incoming().status == 'completed' || incoming().status == 'cancelled')
+        && incoming().participantIds == existing().participantIds
+        && incoming().createdBy == existing().createdBy;
+    }
+
+    match /activities/{activityId} {
+      // Authenticated campus students can discover activities
+      allow get, list: if isSignedIn();
+
+      // Only the authenticated creator can create an activity
+      allow create: if isSignedIn()
+        && isValidId(activityId)
+        && isValidNewActivity(incoming(), activityId);
+
+      // Updates strictly restricted to:
+      // 1. Authorized host edits / cancellation (cannot touch participantIds)
+      // 2. Verified atomic join action (single participant append)
+      // 3. Verified atomic leave action (single participant remove)
+      // 4. Verified 1-to-1 match end action
+      allow update: if isSignedIn()
+        && isValidId(activityId)
+        && (
+          isValidHostUpdate()
+          ||
+          isJoinAction()
+          ||
+          isLeaveAction()
+          ||
+          isEndOneToOneAction()
+        );
+
+      // Only host can delete an activity
+      allow delete: if isSignedIn()
+        && isValidId(activityId)
+        && existing().createdBy == request.auth.uid;
+
+      // -------------------------------------------------------------
+      // Squad Coordination Messages Subcollection:
+      // /activities/{activityId}/messages/{messageId}
+      // -------------------------------------------------------------
+      match /messages/{messageId} {
+        // Enrolled participants of the parent activity can read and post messages
+        function isActivityParticipant() {
+          return isSignedIn()
+            && request.auth.uid in get(/databases/$(database)/documents/activities/$(activityId)).data.participantIds;
+        }
+
+        // Validate message schema and prevent identity spoofing
+        function isValidMessage(data) {
+          return data.senderId == request.auth.uid
+            && data.text is string
+            && data.text.size() > 0
+            && data.text.size() <= 1000
+            && data.senderName is string
+            && data.senderName.size() > 0
+            && data.senderName.size() <= 100
+            && (!('senderAvatarColor' in data) || (data.senderAvatarColor is string && data.senderAvatarColor.size() <= 20))
+            && (!('senderAvatarInitials' in data) || (data.senderAvatarInitials is string && data.senderAvatarInitials.size() <= 5))
+            && (!('activityId' in data) || data.activityId == activityId)
+            && (!('createdAt' in data) || data.createdAt is timestamp || data.createdAt is string);
+        }
+
+        // Only enrolled squad members can read the coordination chat
+        allow get, list: if isActivityParticipant();
+
+        // Enrolled members can send messages with their own authenticated UID
+        allow create: if isActivityParticipant()
+          && isValidId(messageId)
+          && isValidMessage(incoming());
+
+        // Messages are immutable: no edits or deletions permitted
+        allow update, delete: if false;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // AVAILABILITY BROADCASTS: /availabilityBroadcasts/{userId}
+    // Ephemeral student availability broadcasts on campus
+    // -------------------------------------------------------------
+    match /availabilityBroadcasts/{userId} {
+      allow get, list: if isSignedIn();
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && incoming().ownerUid == request.auth.uid;
+
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && incoming().ownerUid == request.auth.uid;
+
+      allow delete: if isOwner(userId) && isValidId(userId);
+    }
+
+    // -------------------------------------------------------------
+    // WAVES: /waves/{waveId}
+    // Real-time peer meetup requests
+    // -------------------------------------------------------------
+    match /waves/{waveId} {
+      allow get, list: if isSignedIn();
+
+      allow create: if isSignedIn()
+        && isValidId(waveId)
+        && incoming().senderUid == request.auth.uid
+        && incoming().recipientUid != request.auth.uid
+        && incoming().status == 'pending';
+
+      allow update: if isSignedIn()
+        && isValidId(waveId)
+        && (
+          // Recipient accepts or declines
+          (
+            existing().recipientUid == request.auth.uid
+            && (incoming().status == 'accepted' || incoming().status == 'declined')
+          )
+          ||
+          // Sender cancels
+          (
+            existing().senderUid == request.auth.uid
+            && incoming().status == 'cancelled'
+          )
+        );
+
+      allow delete: if isSignedIn()
+        && (existing().senderUid == request.auth.uid || existing().recipientUid == request.auth.uid);
+    }
+
+    // -------------------------------------------------------------
+    // PRIVATE CHATS: /privateChats/{chatId}
+    // 1-to-1 Coordination Chat Rooms
+    // -------------------------------------------------------------
+    match /privateChats/{chatId} {
+      allow get, list: if isSignedIn()
+        && request.auth.uid in resource.data.participantUids;
+
+      allow create: if isSignedIn()
+        && isValidId(chatId)
+        && request.auth.uid in incoming().participantUids;
+
+      allow update: if isSignedIn()
+        && isValidId(chatId)
+        && request.auth.uid in existing().participantUids;
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow get, list: if isSignedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/privateChats/$(chatId)).data.participantUids;
+
+        allow create: if isSignedIn()
+          && isValidId(messageId)
+          && request.auth.uid in get(/databases/$(database)/documents/privateChats/$(chatId)).data.participantUids
+          && (incoming().senderId == request.auth.uid || incoming().senderId == 'system');
+
+        allow update, delete: if false;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // MATCH REQUESTS: /matchRequests/{requestId}
+    // 1-to-1 Match Requests between students in Who's Free
+    // -------------------------------------------------------------
+    match /matchRequests/{requestId} {
+      // Helper: check if incoming request document has valid types and required fields
+      function isValidMatchRequest(data) {
+        return data.hostUid is string && data.hostUid.size() > 0 && data.hostUid.size() <= 128
+          && data.hostUid != request.auth.uid
+          && data.requesterUid == request.auth.uid
+          && data.status == 'pending'
+          && data.activityInterest is string && data.activityInterest.size() > 0 && data.activityInterest.size() <= 100
+          && data.requesterName is string && data.requesterName.size() > 0 && data.requesterName.size() <= 100
+          && (!('requesterYear' in data) || (data.requesterYear is string && data.requesterYear.size() <= 50))
+          && data.createdAt == request.time
+          && data.updatedAt == request.time
+          && data.keys().hasOnly(['hostUid', 'requesterUid', 'status', 'activityInterest', 'requesterName', 'requesterYear', 'createdAt', 'updatedAt']);
+      }
+
+      // Read: strictly host or requester
+      allow get: if isSignedIn() && (resource.data.requesterUid == request.auth.uid || resource.data.hostUid == request.auth.uid);
+      allow list: if isSignedIn() && (resource.data.requesterUid == request.auth.uid || resource.data.hostUid == request.auth.uid);
+
+      // Create: authenticated requester requesting a different host
+      allow create: if isSignedIn()
+        && isValidId(requestId)
+        && isValidMatchRequest(incoming());
+
+      // Update:
+      // 1. Requester can cancel their pending request (pending -> cancelled)
+      // 2. Host can decline a pending request (pending -> declined)
+      // 3. Host can accept a pending request and attach activityId (pending -> accepted)
+      // 4. Host or requester can transition accepted request to ended (accepted -> ended)
+      allow update: if isSignedIn()
+        && isValidId(requestId)
+        && (
+          // Transitions from pending status
+          (
+            existing().status == 'pending'
+            && incoming().updatedAt == request.time
+            && (
+              // Requester cancels
+              (
+                existing().requesterUid == request.auth.uid
+                && incoming().status == 'cancelled'
+                && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              )
+              ||
+              // Host declines
+              (
+                existing().hostUid == request.auth.uid
+                && incoming().status == 'declined'
+                && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              )
+              ||
+              // Host accepts with activityId
+              (
+                existing().hostUid == request.auth.uid
+                && incoming().status == 'accepted'
+                && incoming().activityId is string
+                && incoming().activityId.size() > 0
+                && incoming().activityId.size() <= 128
+                && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'activityId', 'updatedAt'])
+                && getAfter(/databases/$(database)/documents/activities/$(incoming().activityId)).data.isOneToOne == true
+                && getAfter(/databases/$(database)/documents/activities/$(incoming().activityId)).data.createdBy == request.auth.uid
+                && getAfter(/databases/$(database)/documents/activities/$(incoming().activityId)).data.matchRequestId == requestId
+                && getAfter(/databases/$(database)/documents/activities/$(incoming().activityId)).data.participantIds == [request.auth.uid, existing().requesterUid]
+              )
+            )
+          )
+          ||
+          // Transition from accepted to ended
+          (
+            existing().status == 'accepted'
+            && (existing().hostUid == request.auth.uid || existing().requesterUid == request.auth.uid)
+            && incoming().status == 'ended'
+            && incoming().updatedAt == request.time
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+
+      // Delete: disabled
+      allow delete: if false;
     }
   }
 }
+
