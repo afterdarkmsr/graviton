@@ -6,7 +6,6 @@ import {
 const KEYS = {
   PROFILE: 'vibematch_profile_v1',
   FREE_NOW: 'vibematch_freenow_v1',
-  REPORTS: 'vibematch_reports_v1',
   ONBOARDED: 'vibematch_onboarded_v1',
 };
 
@@ -125,22 +124,6 @@ class StorageService {
       localStorage.setItem(KEYS.FREE_NOW, JSON.stringify(list));
     } catch (err) {
       console.error('Failed to set Free Now status', err);
-    }
-  }
-
-  // --- Moderation / Report Methods ---
-  public reportActivity(activityId: string, reason: string): void {
-    try {
-      const existing = localStorage.getItem(KEYS.REPORTS);
-      const reports = existing ? JSON.parse(existing) : [];
-      reports.push({
-        activityId,
-        reason,
-        reportedAt: new Date().toISOString(),
-      });
-      localStorage.setItem(KEYS.REPORTS, JSON.stringify(reports));
-    } catch (err) {
-      console.error('Failed to save report', err);
     }
   }
 }

@@ -93,6 +93,8 @@
         "requesterUid": { "type": "string", "description": "Requester student UID for 1-to-1 match" },
         "requesterName": { "type": "string", "maxLength": 100 },
         "endedAt": { "type": "string" },
+        "completedAt": { "type": "string" },
+        "cancelledAt": { "type": "string" },
         "endedByUid": { "type": "string" },
         "originalBroadcastExpiresAt": { "type": "number" },
         "createdAt": { "type": "string", "description": "Creation timestamp" }
@@ -115,6 +117,102 @@
         "updatedAt": { "type": "string", "description": "Update server timestamp" }
       },
       "required": ["hostUid", "requesterUid", "status", "activityInterest", "requesterName"]
+    },
+    "ActivityFeedback": {
+      "title": "ActivityFeedback",
+      "description": "Rating and feedback submitted by a verified squad participant for another member",
+      "type": "object",
+      "properties": {
+        "activityId": { "type": "string" },
+        "activityTitle": { "type": "string" },
+        "isOneToOne": { "type": "boolean" },
+        "raterId": { "type": "string" },
+        "raterName": { "type": "string" },
+        "targetUserId": { "type": "string" },
+        "targetUserName": { "type": "string" },
+        "rating": { "type": "number", "minimum": 1, "maximum": 5 },
+        "tags": { "type": "array" },
+        "comment": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["activityId", "raterId", "targetUserId", "rating"]
+    },
+    "UserReputation": {
+      "title": "UserReputation",
+      "description": "Public aggregate reputation stats for a student",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "averageRating": { "type": "number" },
+        "totalRatings": { "type": "number" },
+        "ratingSum": { "type": "number" },
+        "starDistribution": { "type": "object" },
+        "tagCounts": { "type": "object" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "averageRating", "totalRatings"]
+    },
+    "UserModeration": {
+      "title": "UserModeration",
+      "description": "Private student moderation records including distinct 1-star raters and suspension states",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "distinctOneStarRaters": { "type": "array" },
+        "distinctOneStarCount": { "type": "number" },
+        "isSuspended": { "type": "boolean" },
+        "suspensionStartedAt": { "type": "string" },
+        "suspensionExpiresAt": { "type": "string" },
+        "suspensionReason": { "type": "string" },
+        "appealStatus": { "type": "string" },
+        "appealReason": { "type": "string" },
+        "appealedAt": { "type": "string" },
+        "reviewedByAdmin": { "type": "string" },
+        "reviewedAt": { "type": "string" },
+        "reviewNote": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["userId", "isSuspended"]
+    },
+    "SuspensionRecord": {
+      "title": "SuspensionRecord",
+      "description": "Moderation suspension log created when 5 distinct 1-star ratings are received",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "userName": { "type": "string" },
+        "reason": { "type": "string" },
+        "startedAt": { "type": "string" },
+        "expiresAt": { "type": "string" },
+        "triggeringRatingRefs": { "type": "array" },
+        "status": { "type": "string", "enum": ["active", "appealed", "expired", "resolved"] },
+        "appealReason": { "type": "string" },
+        "appealedAt": { "type": "string" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["userId", "reason", "startedAt", "expiresAt", "status"]
+    },
+    "ActivityReport": {
+      "title": "ActivityReport",
+      "description": "Persistent safety report submitted by a campus student against an activity",
+      "type": "object",
+      "properties": {
+        "activityId": { "type": "string" },
+        "activityTitle": { "type": "string", "maxLength": 150 },
+        "reporterUid": { "type": "string" },
+        "reason": { "type": "string", "enum": ["Inappropriate content", "Spam or commercial", "Non-public or private venue", "Harassment", "Other"] },
+        "details": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["open", "reviewed", "dismissed"] },
+        "reviewedByAdmin": { "type": "string" },
+        "reviewedAt": { "type": "string" },
+        "adminNote": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["activityId", "activityTitle", "reporterUid", "reason", "status"]
     }
   },
   "firestore": {
@@ -129,6 +227,26 @@
     "/matchRequests/{requestId}": {
       "schema": "MatchRequest",
       "description": "Stores 1-to-1 peer match requests between campus students"
+    },
+    "/feedbackPrivate/{feedbackId}": {
+      "schema": "ActivityFeedback",
+      "description": "Stores private participant ratings and endorsements for completed activities"
+    },
+    "/userReputations/{userId}": {
+      "schema": "UserReputation",
+      "description": "Stores public reputation scores, average rating, star breakdown, and tag counts"
+    },
+    "/userModeration/{userId}": {
+      "schema": "UserModeration",
+      "description": "Stores private moderation data and temporary suspension states"
+    },
+    "/suspensions/{suspensionId}": {
+      "schema": "SuspensionRecord",
+      "description": "Stores moderation records for temporary 15-day student suspensions"
+    },
+    "/reports/{reportId}": {
+      "schema": "ActivityReport",
+      "description": "Stores persistent activity safety reports for administrator moderation review"
     }
   }
 }

@@ -3,18 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { onAuthStateChanged, User } from 'firebase/auth';
 import { auth } from './lib/firebase';
 import { authService } from './services/authService';
-import { activityFirestoreService } from './services/activityService';
+import { activityFirestoreService, ActivitySubscriptionMeta } from './services/activityService';
 import { matchRequestService } from './services/matchRequestService';
 import { ActiveTab, Activity, ActivityCategory, MatchRequest, SkillLevel, UserProfile } from './types';
 import { storageService } from './services/storageService';
 import { collegeVerificationService } from './services/collegeVerificationService';
+import { isActivityPast } from './utils/activityRetention';
 
 import { Navbar } from './components/Navbar';
-import { RescueMeModal } from './components/RescueMeModal';
 import { WelcomeScreen } from './screens/WelcomeScreen';
 import { OnboardingScreen } from './screens/OnboardingScreen';
 import { DiscoverScreen } from './screens/DiscoverScreen';
@@ -23,68 +23,195 @@ import { ActivityDetailScreen } from './screens/ActivityDetailScreen';
 import { FreeNowScreen } from './screens/FreeNowScreen';
 import { MyActivitiesScreen } from './screens/MyActivitiesScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
+import { AdminAppealsScreen } from './screens/AdminAppealsScreen';
+import { SuspensionNoticeBanner } from './components/SuspensionNoticeBanner';
+import { feedbackService } from './services/feedbackService';
+import { UserModeration, UserReputation } from './types';
 import { CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
 
 export default function App() {
   const [authUser, setAuthUser] = useState<User | null>(null);
+  const [authRefreshTick, setAuthRefreshTick] = useState<number>(0);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
   const [profile, setProfile] = useState<UserProfile | null>(() => storageService.getProfile());
-  const [activities, setActivities] = useState<Activity[]>([]);
+  const [realtimeActivities, setRealtimeActivities] = useState<Activity[]>([]);
+  const [extraDiscoveryActivities, setExtraDiscoveryActivities] = useState<Activity[]>([]);
+  const [extraUserActivities, setExtraUserActivities] = useState<Activity[]>([]);
+  const [activityMeta, setActivityMeta] = useState<ActivitySubscriptionMeta | null>(null);
+  const [isLoadingMoreDiscovery, setIsLoadingMoreDiscovery] = useState<boolean>(false);
+  const [isLoadingMoreUser, setIsLoadingMoreUser] = useState<boolean>(false);
+  const hasPaginatedDiscoveryRef = useRef<boolean>(false);
+  const hasPaginatedUserRef = useRef<boolean>(false);
+  const [activitiesLoaded, setActivitiesLoaded] = useState<boolean>(false);
   const [incomingMatchRequests, setIncomingMatchRequests] = useState<MatchRequest[]>([]);
+  const [outgoingMatchRequests, setOutgoingMatchRequests] = useState<MatchRequest[]>([]);
+  const [currentUserReputation, setCurrentUserReputation] = useState<UserReputation | null>(null);
+  const [currentUserModeration, setCurrentUserModeration] = useState<UserModeration | null>(null);
+  const [isAdmin, setIsAdmin] = useState<boolean>(false);
 
   // Views: 'welcome' | 'onboarding' | 'main'
   const [currentView, setCurrentView] = useState<'welcome' | 'onboarding' | 'main'>('welcome');
   const [activeTab, setActiveTab] = useState<ActiveTab>('discover');
   const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null);
 
-  // Modals & Pre-fills
-  const [isRescueModalOpen, setIsRescueModalOpen] = useState(false);
+  // Pre-fills
   const [createPrefill, setCreatePrefill] = useState<{
     suggestedNote?: string;
     venueHint?: string;
   } | null>(null);
 
-  // Global Toast Notification
+  // Global Toast Notification (timeout race guarded via ref)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(
     null
   );
+  const toastTimerRef = useRef<number | null>(null);
 
-  const showToast = (message: string, type: 'success' | 'info' | 'error' = 'success') => {
-    let cleanMsg = message;
-    try {
-      const parsed = JSON.parse(message);
-      if (parsed?.error) cleanMsg = parsed.error;
-    } catch {
-      // not JSON
-    }
-    setToast({ message: cleanMsg, type });
-    setTimeout(() => {
-      setToast(null);
-    }, 4500);
-  };
+  const showToast = useCallback(
+    (message: string, type: 'success' | 'info' | 'error' = 'success') => {
+      let cleanMsg = message;
+      try {
+        const parsed = JSON.parse(message);
+        if (parsed?.error) cleanMsg = parsed.error;
+      } catch {
+        // not JSON
+      }
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+      setToast({ message: cleanMsg, type });
+      toastTimerRef.current = window.setTimeout(() => {
+        setToast(null);
+        toastTimerRef.current = null;
+      }, 4500);
+    },
+    []
+  );
 
-  // Real-time Firestore Activities Listener (cleaned up on unmount or sign-out)
   useEffect(() => {
+    return () => {
+      if (toastTimerRef.current !== null) {
+        window.clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Merge paginated older pages with live real-time snapshots (real-time wins on overlapping IDs)
+  const activities = useMemo(() => {
+    const merged = new Map<string, Activity>();
+    extraDiscoveryActivities.forEach((act) => merged.set(act.id, act));
+    extraUserActivities.forEach((act) => merged.set(act.id, act));
+    realtimeActivities.forEach((act) => merged.set(act.id, act));
+    return Array.from(merged.values()).sort((a, b) => {
+      const timeA = new Date(a.dateTime).getTime() || 0;
+      const timeB = new Date(b.dateTime).getTime() || 0;
+      return timeA - timeB;
+    });
+  }, [realtimeActivities, extraDiscoveryActivities, extraUserActivities]);
+
+  // Bounded real-time Firestore Activities Listeners (Discovery + Active User + Paginated History)
+  useEffect(() => {
+    hasPaginatedDiscoveryRef.current = false;
+    hasPaginatedUserRef.current = false;
+
     if (!authUser) {
-      setActivities([]);
+      setRealtimeActivities([]);
+      setExtraDiscoveryActivities([]);
+      setExtraUserActivities([]);
+      setActivityMeta(null);
+      setActivitiesLoaded(false);
       return;
     }
 
-    const unsubscribe = activityFirestoreService.subscribeToActivities(
+    setExtraDiscoveryActivities([]);
+    setExtraUserActivities([]);
+
+    const unsubscribe = activityFirestoreService.subscribeToDiscoveryAndUserActivities(
+      authUser.uid,
       (cloudActivities) => {
-        setActivities(cloudActivities);
+        setRealtimeActivities(cloudActivities);
+        setActivitiesLoaded(true);
       },
       (err) => {
         console.warn('Real-time activities subscription warning:', err);
+        setActivitiesLoaded(true);
+      },
+      (meta) => {
+        setActivityMeta((prev) => ({
+          recentCutoffISO: meta.recentCutoffISO,
+          hasMoreDiscovery:
+            prev && hasPaginatedDiscoveryRef.current ? prev.hasMoreDiscovery : meta.hasMoreDiscovery,
+          discoveryLastDoc:
+            prev && hasPaginatedDiscoveryRef.current ? prev.discoveryLastDoc : meta.discoveryLastDoc,
+          hasMoreUserHistory:
+            prev && hasPaginatedUserRef.current ? prev.hasMoreUserHistory : meta.hasMoreUserHistory,
+          userHistoryLastDoc:
+            prev && hasPaginatedUserRef.current ? prev.userHistoryLastDoc : meta.userHistoryLastDoc,
+        }));
       }
     );
 
     return () => {
       unsubscribe();
     };
-  }, [authUser]);
+  }, [authUser?.uid]);
 
-  // Real-time Incoming Match Requests Listener for Navbar Notification Badge
+  const handleLoadMoreDiscovery = async () => {
+    if (!activityMeta?.discoveryLastDoc || !activityMeta.hasMoreDiscovery || isLoadingMoreDiscovery) {
+      return;
+    }
+    setIsLoadingMoreDiscovery(true);
+    try {
+      const page = await activityFirestoreService.fetchMoreDiscoveryActivities(
+        activityMeta.recentCutoffISO,
+        activityMeta.discoveryLastDoc
+      );
+      hasPaginatedDiscoveryRef.current = true;
+      setExtraDiscoveryActivities((prev) => [...prev, ...page.activities]);
+      setActivityMeta((prev) =>
+        prev
+          ? {
+              ...prev,
+              discoveryLastDoc: page.lastDoc,
+              hasMoreDiscovery: page.hasMore,
+            }
+          : prev
+      );
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Unable to load more activities.', 'error');
+    } finally {
+      setIsLoadingMoreDiscovery(false);
+    }
+  };
+
+  const handleLoadMoreUserActivities = async () => {
+    if (!authUser?.uid || !activityMeta?.userHistoryLastDoc || !activityMeta.hasMoreUserHistory || isLoadingMoreUser) {
+      return;
+    }
+    setIsLoadingMoreUser(true);
+    try {
+      const page = await activityFirestoreService.fetchMoreUserActivities(
+        authUser.uid,
+        activityMeta.userHistoryLastDoc
+      );
+      hasPaginatedUserRef.current = true;
+      setExtraUserActivities((prev) => [...prev, ...page.activities]);
+      setActivityMeta((prev) =>
+        prev
+          ? {
+              ...prev,
+              userHistoryLastDoc: page.lastDoc,
+              hasMoreUserHistory: page.hasMore,
+            }
+          : prev
+      );
+    } catch (err: unknown) {
+      showToast(err instanceof Error ? err.message : 'Unable to load older squads.', 'error');
+    } finally {
+      setIsLoadingMoreUser(false);
+    }
+  };
+
+  // Real-time Incoming Match Requests Listener for Navbar & FreeNowScreen
   useEffect(() => {
     if (!authUser) {
       setIncomingMatchRequests([]);
@@ -104,24 +231,19 @@ export default function App() {
     return () => {
       unsubscribe();
     };
-  }, [authUser]);
+  }, [authUser?.uid]);
 
-  // Real-time Outgoing Match Requests Listener for Requester Direct Chat Navigation
+  // Real-time Outgoing Match Requests Listener for Requester & FreeNowScreen
   useEffect(() => {
-    if (!authUser) return;
+    if (!authUser) {
+      setOutgoingMatchRequests([]);
+      return;
+    }
 
     const unsubscribe = matchRequestService.subscribeOutgoingRequests(
       authUser.uid,
       (reqs) => {
-        const accepted = reqs.find((r) => r.status === 'accepted' && r.activityId);
-        if (accepted && accepted.activityId) {
-          const navKey = `navigated_match_${accepted.id}`;
-          if (!sessionStorage.getItem(navKey)) {
-            sessionStorage.setItem(navKey, 'true');
-            showToast('Match request accepted! Entering Squad Chat...', 'success');
-            setSelectedActivityId(accepted.activityId);
-          }
-        }
+        setOutgoingMatchRequests(reqs);
       },
       (err) => {
         console.warn('Outgoing match requests subscription notice:', err);
@@ -131,8 +253,80 @@ export default function App() {
     return () => {
       unsubscribe();
     };
-  }, [authUser]);
+  }, [authUser?.uid]);
 
+  // Auto-open Squad Chat ONLY for accepted requests linked to a live, non-ended 1-to-1 activity
+  useEffect(() => {
+    if (!authUser || !activitiesLoaded || outgoingMatchRequests.length === 0) return;
+
+    const accepted = outgoingMatchRequests.find((r) => {
+      if (r.status !== 'accepted' || !r.activityId) return false;
+      const linkedAct = activities.find((a) => a.id === r.activityId);
+      if (!linkedAct) return false;
+      if (linkedAct.status !== 'active' || linkedAct.endedAt || isActivityPast(linkedAct)) {
+        return false;
+      }
+      const navKey = `navigated_match_${r.id}`;
+      return !localStorage.getItem(navKey);
+    });
+
+    if (accepted && accepted.activityId) {
+      localStorage.setItem(`navigated_match_${accepted.id}`, 'true');
+      showToast('Match request accepted! Entering Squad Chat...', 'success');
+      setSelectedActivityId(accepted.activityId);
+    }
+  }, [authUser?.uid, activitiesLoaded, activities, outgoingMatchRequests]);
+
+  // Real-time Reputation & Suspension Listener for Current User
+  useEffect(() => {
+    if (!authUser?.uid) {
+      setCurrentUserReputation(null);
+      setCurrentUserModeration(null);
+      return;
+    }
+
+    const unsubRep = feedbackService.subscribeUserReputation(
+      authUser.uid,
+      (rep) => {
+        setCurrentUserReputation(rep);
+      }
+    );
+
+    const unsubMod = feedbackService.subscribeUserModeration(
+      authUser.uid,
+      (mod) => {
+        setCurrentUserModeration(mod);
+      },
+      (err) => {
+        console.warn('User moderation subscription error:', err);
+      }
+    );
+
+    return () => {
+      unsubRep();
+      unsubMod();
+    };
+  }, [authUser?.uid]);
+
+  const currentUserSuspension = feedbackService.isSuspended(currentUserModeration || currentUserReputation);
+
+  // Check custom claim admin on auth token
+  useEffect(() => {
+    if (!authUser) {
+      setIsAdmin(false);
+      return;
+    }
+
+    authUser
+      .getIdTokenResult()
+      .then((idTokenResult) => {
+        setIsAdmin(idTokenResult.claims.admin === true);
+      })
+      .catch((err) => {
+        console.warn('Failed to retrieve auth token claims:', err);
+        setIsAdmin(false);
+      });
+  }, [authUser, authRefreshTick]);
 
   // Safe CGC Email Verification Link Handler
   // Never creates a duplicate account - strictly links credential to active authUser
@@ -149,7 +343,8 @@ export default function App() {
         showToast(`CGC college email verified: ${result.linkedEmail}`, 'success');
         try {
           await authUser.reload();
-          setAuthUser({ ...auth.currentUser! });
+          setAuthUser(auth.currentUser);
+          setAuthRefreshTick((t) => t + 1);
         } catch (e) {
           console.warn('Auth reload warning:', e);
         }
@@ -223,7 +418,7 @@ export default function App() {
             setCurrentView('onboarding');
           }
         } catch (err) {
-          console.error('Failed to retrieve user profile from Firestore:', err);
+          console.warn('Notice retrieving user profile from Firestore (falling back to cache):', err);
           const cached = storageService.getProfile();
           if (cached && cached.id === firebaseUser.uid) {
             setProfile(cached);
@@ -309,6 +504,18 @@ export default function App() {
     if (!act) return;
 
     try {
+      const strictSusp = await feedbackService.getSuspensionStatusStrict(profile.id);
+      if (strictSusp.isSuspended || currentUserSuspension.isSuspended) {
+        const exp = strictSusp.expiresAt || currentUserSuspension.expiresAt;
+        showToast(
+          `Account suspended: You cannot join squads while under temporary suspension (expires ${
+            exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+          }).`,
+          'error'
+        );
+        return;
+      }
+
       showToast('Securing your spot...', 'info');
       await activityFirestoreService.joinActivity(activityId, profile);
       showToast('You joined this squad! Welcome to the Squad Chat.', 'success');
@@ -344,10 +551,23 @@ export default function App() {
     skillLevel: SkillLevel;
   }) => {
     if (!profile || !authUser) {
-      showToast('You must be signed in to create an activity.', 'error');
-      return;
+      const msg = 'You must be signed in to create an activity.';
+      showToast(msg, 'error');
+      throw new Error(msg);
     }
+
+    const strictSusp = await feedbackService.getSuspensionStatusStrict(authUser.uid);
+    if (strictSusp.isSuspended || currentUserSuspension.isSuspended) {
+      const exp = strictSusp.expiresAt || currentUserSuspension.expiresAt;
+      const msg = `Account suspended: You cannot create squads while under temporary suspension (expires ${
+        exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+      }).`;
+      showToast(msg, 'error');
+      throw new Error(msg);
+    }
+
     const created = await activityFirestoreService.createActivity(data, profile);
+    setCreatePrefill(null);
     setSelectedActivityId(created.id);
     setActiveTab('discover');
     showToast(`"${created.title}" published to Cloud Firestore! You are set as host.`);
@@ -444,16 +664,27 @@ export default function App() {
         }}
         profile={profile}
         joinedCount={joinedCount}
-        onOpenRescueModal={() => setIsRescueModalOpen(true)}
         incomingMatchRequestsCount={incomingMatchRequests.length}
+        isAdmin={isAdmin}
       />
+
+      {/* Global Suspension Banner */}
+      {currentUserSuspension.isSuspended && authUser && (
+        <SuspensionNoticeBanner
+          userId={authUser.uid}
+          reason={currentUserSuspension.reason}
+          expiresAt={currentUserSuspension.expiresAt}
+          remainingDays={currentUserSuspension.remainingDays}
+          appealStatus={currentUserSuspension.appealStatus}
+        />
+      )}
 
       {/* Toast Notification Banner */}
       {toast && (
         <aside
           role="status"
           aria-live="polite"
-          className="fixed top-18 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-xs font-semibold animate-in fade-in slide-in-from-top duration-200 border"
+          className="fixed top-16 sm:top-18 left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] sm:w-auto max-w-md px-4 py-2.5 rounded-2xl shadow-xl flex items-center gap-2 text-xs font-semibold animate-in fade-in slide-in-from-top duration-200 border break-words"
           style={{
             backgroundColor:
               toast.type === 'error'
@@ -480,7 +711,7 @@ export default function App() {
           ) : (
             <CheckCircle2 className="w-4 h-4 shrink-0" />
           )}
-          <span>{toast.message}</span>
+          <span className="min-w-0 flex-1 leading-snug">{toast.message}</span>
         </aside>
       )}
 
@@ -490,6 +721,8 @@ export default function App() {
           <ActivityDetailScreen
             activityId={selectedActivityId}
             currentUser={profile}
+            authUser={authUser}
+            currentUserSuspension={currentUserSuspension}
             activities={activities}
             onBack={() => setSelectedActivityId(null)}
             onActivityUpdated={() => {}}
@@ -500,13 +733,18 @@ export default function App() {
             currentUser={profile}
             onSelectActivity={handleSelectActivity}
             onJoinActivity={handleJoinActivity}
-            onOpenRescueModal={() => setIsRescueModalOpen(true)}
             onCreateActivity={() => setActiveTab('create')}
+            hasMoreActivities={!!activityMeta?.hasMoreDiscovery}
+            isLoadingMore={isLoadingMoreDiscovery}
+            onLoadMore={handleLoadMoreDiscovery}
           />
         ) : activeTab === 'free_now' ? (
           <FreeNowScreen
             currentUser={profile}
             activities={activities}
+            incomingRequests={incomingMatchRequests}
+            outgoingRequests={outgoingMatchRequests}
+            currentUserSuspension={currentUserSuspension}
             onToast={showToast}
             onProfileUpdated={() => {
               const updated = storageService.getProfile();
@@ -519,11 +757,9 @@ export default function App() {
         ) : activeTab === 'create' ? (
           <CreateActivityScreen
             currentUser={profile}
+            currentUserSuspension={currentUserSuspension}
             prefill={createPrefill}
-            onCreate={(data) => {
-              setCreatePrefill(null);
-              handleCreateActivitySubmit(data);
-            }}
+            onCreate={handleCreateActivitySubmit}
             onCancel={() => {
               setCreatePrefill(null);
               setActiveTab('discover');
@@ -536,6 +772,16 @@ export default function App() {
             onSelectActivity={handleSelectActivity}
             onExplore={() => setActiveTab('discover')}
             onActivityUpdated={() => {}}
+            hasMoreUserActivities={!!activityMeta?.hasMoreUserHistory}
+            isLoadingMore={isLoadingMoreUser}
+            onLoadMoreUserActivities={handleLoadMoreUserActivities}
+          />
+        ) : activeTab === 'admin_appeals' ? (
+          <AdminAppealsScreen
+            authUser={authUser}
+            isAdmin={isAdmin}
+            onBack={() => setActiveTab('profile')}
+            onToast={showToast}
           />
         ) : (
           <ProfileScreen
@@ -543,6 +789,14 @@ export default function App() {
             authUser={authUser}
             joinedCount={joinedCount}
             hostedCount={hostedCount}
+            currentUserSuspension={currentUserSuspension}
+            appealStatus={currentUserSuspension.appealStatus}
+            isAdmin={isAdmin}
+            onOpenAdminAppeals={() => setActiveTab('admin_appeals')}
+            onRefreshAuthState={() => {
+              setAuthUser(auth.currentUser);
+              setAuthRefreshTick((t) => t + 1);
+            }}
             onProfileUpdated={(up) => {
               setProfile(up);
               storageService.saveProfile(up);
@@ -551,22 +805,6 @@ export default function App() {
           />
         )}
       </main>
-
-      {/* Signature Feature Modal: Rescue Me From Boredom */}
-      <RescueMeModal
-        isOpen={isRescueModalOpen}
-        onClose={() => setIsRescueModalOpen(false)}
-        profile={profile}
-        activities={activities}
-        onSelectActivity={(act) => {
-          setSelectedActivityId(act.id);
-        }}
-        onJoinActivity={handleJoinActivity}
-        onCreateActivity={() => {
-          setSelectedActivityId(null);
-          setActiveTab('create');
-        }}
-      />
     </div>
   );
 }

@@ -14,6 +14,7 @@ import {
 import { db, auth, handleFirestoreError, OperationType } from '../lib/firebase';
 import { ActivityCategory, MatchRequest, MatchRequestStatus, UserProfile } from '../types';
 import { availabilityService } from './availabilityService';
+import { feedbackService } from './feedbackService';
 
 export interface SendMatchRequestInput {
   hostUid: string;
@@ -49,6 +50,12 @@ export class MatchRequestService {
 
     if (requesterUid === hostUid) {
       throw new Error('You cannot request a match with yourself.');
+    }
+
+    // Check if requester is currently suspended using authoritative userModeration
+    const susp = await feedbackService.getSuspensionStatusStrict(requesterUid);
+    if (susp.isSuspended) {
+      throw new Error('Account suspended: You cannot send match requests while under temporary suspension.');
     }
 
     // Check if requester is already in an active 1-to-1 match

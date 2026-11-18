@@ -3,6 +3,7 @@ import {
   addDoc,
   doc,
   getDoc,
+  getDocs,
   updateDoc,
   deleteDoc,
   onSnapshot,
@@ -11,9 +12,38 @@ import {
   runTransaction,
   query,
   orderBy,
+  where,
+  limit,
+  startAfter,
+  DocumentData,
+  QueryDocumentSnapshot,
 } from 'firebase/firestore';
 import { db, auth, handleFirestoreError, OperationType } from '../lib/firebase';
 import { Activity, ActivityCategory, ActivityMessage, ActivityParticipant, SkillLevel, UserProfile } from '../types';
+
+export interface ActivitySubscriptionMeta {
+  hasMoreDiscovery: boolean;
+  hasMoreUserHistory: boolean;
+  discoveryLastDoc: QueryDocumentSnapshot<DocumentData> | null;
+  userHistoryLastDoc: QueryDocumentSnapshot<DocumentData> | null;
+  recentCutoffISO: string;
+}
+
+export interface PaginatedActivitiesResult {
+  activities: Activity[];
+  lastDoc: QueryDocumentSnapshot<DocumentData> | null;
+  hasMore: boolean;
+}
+
+const DISCOVERY_PAGE_SIZE = 100;
+const USER_HISTORY_PAGE_SIZE = 50;
+
+function isMissingIndexError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = (err as { code?: string }).code;
+  const message = (err as { message?: string }).message || '';
+  return code === 'failed-precondition' || message.toLowerCase().includes('requires an index');
+}
 
 export interface CreateActivityInput {
   title: string;
@@ -123,85 +153,375 @@ export class ActivityFirestoreService {
     }
   }
 
+  private mapDocToActivity(docId: string, data: DocumentData): Activity {
+    let createdAtISO = new Date().toISOString();
+    if (data.createdAt instanceof Timestamp) {
+      createdAtISO = data.createdAt.toDate().toISOString();
+    } else if (data.createdAt && typeof data.createdAt.toDate === 'function') {
+      createdAtISO = data.createdAt.toDate().toISOString();
+    } else if (typeof data.createdAt === 'string') {
+      createdAtISO = data.createdAt;
+    }
+
+    const participantIds: string[] = Array.isArray(data.participantIds)
+      ? data.participantIds
+      : [data.createdBy || 'unknown'];
+
+    const parseISO = (val: unknown): string | undefined => {
+      if (!val) return undefined;
+      if (typeof val === 'string') return val;
+      if (val instanceof Timestamp) return val.toDate().toISOString();
+      if (typeof (val as { toDate?: () => Date }).toDate === 'function') {
+        return (val as { toDate: () => Date }).toDate().toISOString();
+      }
+      if (typeof val === 'number' && !isNaN(val)) return new Date(val).toISOString();
+      return undefined;
+    };
+
+    return {
+      id: docId,
+      title: data.title || 'Untitled Activity',
+      category: (data.category as ActivityCategory) || 'Campus Hangout',
+      categoryGroup: (data.categoryGroup as 'sports' | 'social' | 'study') || 'social',
+      description: data.description || '',
+      campus: data.campus,
+      venue: data.venue || 'Campus Center',
+      dateTime: data.dateTime || new Date().toISOString(),
+      durationMinutes: Number(data.durationMinutes) || 60,
+      maxParticipants: Number(data.maxParticipants) || 4,
+      skillLevel: (data.skillLevel as SkillLevel) || 'All Levels',
+      createdBy: data.createdBy || '',
+      hostId: data.createdBy || '',
+      hostName: data.hostName || 'Student',
+      hostCollege: data.hostCollege || data.campus || 'CGC',
+      hostAvatarColor: data.hostAvatarColor || '#3A0F34',
+      hostAvatarInitials: data.hostAvatarInitials || 'ST',
+      participantIds,
+      isDemo: false,
+      status: (data.status as Activity['status']) || 'active',
+      createdAt: createdAtISO,
+      isOneToOne: !!data.isOneToOne,
+      matchRequestId: data.matchRequestId,
+      requesterUid: data.requesterUid,
+      requesterName: data.requesterName,
+      endedAt: parseISO(data.endedAt),
+      completedAt: parseISO(data.completedAt),
+      cancelledAt: parseISO(data.cancelledAt),
+      updatedAt: parseISO(data.updatedAt),
+      endedByUid: data.endedByUid,
+      originalBroadcastExpiresAt: data.originalBroadcastExpiresAt,
+    };
+  }
+
   /**
-   * Subscribes to real-time updates from Firestore 'activities' collection using onSnapshot().
-   * Automatically parses Firestore documents into the typed Activity model and provides error handling.
+   * Subscribes to:
+   * 1. Soonest-first upcoming/recent discovery activities (active/full within [now - 24h, ...], limit 100)
+   * 2. ALL active/full squads where the user is a participant (no dateTime filter/limit, catches docs missing dateTime)
+   * 3. Bounded recent user squad history (limit 50, paginated via fetchMoreUserActivities)
+   *
+   * Automatically degrades to un-ordered queries if a composite index is still building or undeployed.
+   */
+  public subscribeToDiscoveryAndUserActivities(
+    userId: string,
+    onUpdate: (activities: Activity[]) => void,
+    onError?: (err: unknown) => void,
+    onMetaUpdate?: (meta: ActivitySubscriptionMeta) => void
+  ): () => void {
+    const discoveryMap = new Map<string, Activity>();
+    const userActiveMap = new Map<string, Activity>();
+    const userHistoryMap = new Map<string, Activity>();
+
+    const recentCutoffISO = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    let discoveryLastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+    let userHistoryLastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+    let hasMoreDiscovery = false;
+    let hasMoreUserHistory = false;
+    let isDisposed = false;
+
+    const emitMerged = () => {
+      if (isDisposed) return;
+      const merged = new Map<string, Activity>(discoveryMap);
+      userHistoryMap.forEach((act, id) => merged.set(id, act));
+      userActiveMap.forEach((act, id) => merged.set(id, act));
+      const list = Array.from(merged.values()).sort((a, b) => {
+        const timeA = new Date(a.dateTime).getTime() || 0;
+        const timeB = new Date(b.dateTime).getTime() || 0;
+        return timeA - timeB;
+      });
+      onUpdate(list);
+      onMetaUpdate?.({
+        hasMoreDiscovery,
+        hasMoreUserHistory,
+        discoveryLastDoc,
+        userHistoryLastDoc,
+        recentCutoffISO,
+      });
+    };
+
+    let unsubDiscovery: (() => void) | null = null;
+    let unsubUserActive: (() => void) | null = null;
+    let unsubUserHistory: (() => void) | null = null;
+
+    const attachDiscovery = (useIndexedQuery: boolean) => {
+      if (isDisposed) return;
+      const q = useIndexedQuery
+        ? query(
+            collection(db, this.collectionName),
+            where('status', 'in', ['active', 'full']),
+            where('dateTime', '>=', recentCutoffISO),
+            orderBy('dateTime', 'asc'),
+            limit(DISCOVERY_PAGE_SIZE)
+          )
+        : query(
+            collection(db, this.collectionName),
+            where('status', 'in', ['active', 'full']),
+            limit(DISCOVERY_PAGE_SIZE)
+          );
+
+      unsubDiscovery = onSnapshot(
+        q,
+        (snapshot) => {
+          discoveryMap.clear();
+          snapshot.docs.forEach((docSnap: QueryDocumentSnapshot<DocumentData>) => {
+            discoveryMap.set(docSnap.id, this.mapDocToActivity(docSnap.id, docSnap.data()));
+          });
+          discoveryLastDoc =
+            useIndexedQuery && snapshot.docs.length > 0
+              ? snapshot.docs[snapshot.docs.length - 1]
+              : null;
+          hasMoreDiscovery = useIndexedQuery && snapshot.docs.length === DISCOVERY_PAGE_SIZE;
+          emitMerged();
+        },
+        (error) => {
+          if (useIndexedQuery && isMissingIndexError(error)) {
+            console.warn('Discovery composite index missing; falling back to un-ordered discovery query.');
+            unsubDiscovery?.();
+            attachDiscovery(false);
+            return;
+          }
+          onError?.(error);
+          console.error('Firestore discovery activities listener error:', error);
+        }
+      );
+    };
+
+    const attachUserActive = (useIndexedQuery: boolean) => {
+      if (isDisposed) return;
+      const q = useIndexedQuery
+        ? query(
+            collection(db, this.collectionName),
+            where('participantIds', 'array-contains', userId),
+            where('status', 'in', ['active', 'full'])
+          )
+        : query(
+            collection(db, this.collectionName),
+            where('participantIds', 'array-contains', userId),
+            limit(DISCOVERY_PAGE_SIZE)
+          );
+
+      unsubUserActive = onSnapshot(
+        q,
+        (snapshot) => {
+          userActiveMap.clear();
+          snapshot.docs.forEach((docSnap: QueryDocumentSnapshot<DocumentData>) => {
+            const mapped = this.mapDocToActivity(docSnap.id, docSnap.data());
+            if (mapped.status === 'active' || mapped.status === 'full') {
+              userActiveMap.set(docSnap.id, mapped);
+            }
+          });
+          emitMerged();
+        },
+        (error) => {
+          if (useIndexedQuery && isMissingIndexError(error)) {
+            console.warn('Active-user composite index missing; falling back to participantIds query.');
+            unsubUserActive?.();
+            attachUserActive(false);
+            return;
+          }
+          onError?.(error);
+          console.error('Firestore active user activities listener error:', error);
+        }
+      );
+    };
+
+    const attachUserHistory = (useIndexedQuery: boolean) => {
+      if (isDisposed) return;
+      const q = useIndexedQuery
+        ? query(
+            collection(db, this.collectionName),
+            where('participantIds', 'array-contains', userId),
+            orderBy('dateTime', 'desc'),
+            limit(USER_HISTORY_PAGE_SIZE)
+          )
+        : query(
+            collection(db, this.collectionName),
+            where('participantIds', 'array-contains', userId),
+            limit(DISCOVERY_PAGE_SIZE)
+          );
+
+      unsubUserHistory = onSnapshot(
+        q,
+        (snapshot) => {
+          userHistoryMap.clear();
+          snapshot.docs.forEach((docSnap: QueryDocumentSnapshot<DocumentData>) => {
+            userHistoryMap.set(docSnap.id, this.mapDocToActivity(docSnap.id, docSnap.data()));
+          });
+          userHistoryLastDoc =
+            useIndexedQuery && snapshot.docs.length > 0
+              ? snapshot.docs[snapshot.docs.length - 1]
+              : null;
+          hasMoreUserHistory = useIndexedQuery && snapshot.docs.length === USER_HISTORY_PAGE_SIZE;
+          emitMerged();
+        },
+        (error) => {
+          if (useIndexedQuery && isMissingIndexError(error)) {
+            console.warn('User history composite index missing; falling back to participantIds query.');
+            unsubUserHistory?.();
+            attachUserHistory(false);
+            return;
+          }
+          onError?.(error);
+          console.error('Firestore user history activities listener error:', error);
+        }
+      );
+    };
+
+    attachDiscovery(true);
+    attachUserActive(true);
+    attachUserHistory(true);
+
+    return () => {
+      isDisposed = true;
+      unsubDiscovery?.();
+      unsubUserActive?.();
+      unsubUserHistory?.();
+    };
+  }
+
+  /**
+   * Cursor-paginates additional active/full discovery activities beyond the initial 100.
+   */
+  public async fetchMoreDiscoveryActivities(
+    recentCutoffISO: string,
+    cursorDoc: QueryDocumentSnapshot<DocumentData>,
+    pageSize = DISCOVERY_PAGE_SIZE
+  ): Promise<PaginatedActivitiesResult> {
+    try {
+      const q = query(
+        collection(db, this.collectionName),
+        where('status', 'in', ['active', 'full']),
+        where('dateTime', '>=', recentCutoffISO),
+        orderBy('dateTime', 'asc'),
+        startAfter(cursorDoc),
+        limit(pageSize)
+      );
+      const snap = await getDocs(q);
+      return {
+        activities: snap.docs.map((d) => this.mapDocToActivity(d.id, d.data())),
+        lastDoc: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null,
+        hasMore: snap.docs.length === pageSize,
+      };
+    } catch (error) {
+      if (isMissingIndexError(error)) {
+        return { activities: [], lastDoc: null, hasMore: false };
+      }
+      handleFirestoreError(error, OperationType.LIST, this.collectionName);
+    }
+  }
+
+  /**
+   * Cursor-paginates older user activities beyond the most recent 50 documents.
+   */
+  public async fetchMoreUserActivities(
+    userId: string,
+    cursorDoc: QueryDocumentSnapshot<DocumentData>,
+    pageSize = USER_HISTORY_PAGE_SIZE
+  ): Promise<PaginatedActivitiesResult> {
+    try {
+      const q = query(
+        collection(db, this.collectionName),
+        where('participantIds', 'array-contains', userId),
+        orderBy('dateTime', 'desc'),
+        startAfter(cursorDoc),
+        limit(pageSize)
+      );
+      const snap = await getDocs(q);
+      return {
+        activities: snap.docs.map((d) => this.mapDocToActivity(d.id, d.data())),
+        lastDoc: snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null,
+        hasMore: snap.docs.length === pageSize,
+      };
+    } catch (error) {
+      if (isMissingIndexError(error)) {
+        return { activities: [], lastDoc: null, hasMore: false };
+      }
+      handleFirestoreError(error, OperationType.LIST, this.collectionName);
+    }
+  }
+
+  /**
+   * Subscribes to bounded real-time discovery updates from Firestore 'activities' collection.
    */
   public subscribeToActivities(
     onUpdate: (activities: Activity[]) => void,
     onError?: (err: unknown) => void
   ): () => void {
-    const colRef = collection(db, this.collectionName);
+    const recentCutoffISO = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    let activeUnsub: (() => void) | null = null;
+    let isDisposed = false;
 
-    return onSnapshot(
-      colRef,
-      (snapshot) => {
-        const activities: Activity[] = snapshot.docs.map((docSnap) => {
-          const data = docSnap.data();
+    const attach = (useIndexedQuery: boolean) => {
+      if (isDisposed) return;
+      const q = useIndexedQuery
+        ? query(
+            collection(db, this.collectionName),
+            where('status', 'in', ['active', 'full']),
+            where('dateTime', '>=', recentCutoffISO),
+            orderBy('dateTime', 'asc'),
+            limit(DISCOVERY_PAGE_SIZE)
+          )
+        : query(
+            collection(db, this.collectionName),
+            where('status', 'in', ['active', 'full']),
+            limit(DISCOVERY_PAGE_SIZE)
+          );
 
-          let createdAtISO = new Date().toISOString();
-          if (data.createdAt instanceof Timestamp) {
-            createdAtISO = data.createdAt.toDate().toISOString();
-          } else if (data.createdAt && typeof data.createdAt.toDate === 'function') {
-            createdAtISO = data.createdAt.toDate().toISOString();
-          } else if (typeof data.createdAt === 'string') {
-            createdAtISO = data.createdAt;
+      activeUnsub = onSnapshot(
+        q,
+        (snapshot) => {
+          const activities: Activity[] = snapshot.docs.map((docSnap) =>
+            this.mapDocToActivity(docSnap.id, docSnap.data())
+          );
+
+          activities.sort((a, b) => {
+            return (new Date(a.dateTime).getTime() || 0) - (new Date(b.dateTime).getTime() || 0);
+          });
+
+          onUpdate(activities);
+        },
+        (error) => {
+          if (useIndexedQuery && isMissingIndexError(error)) {
+            console.warn('Activities discovery index missing; falling back to un-ordered discovery query.');
+            activeUnsub?.();
+            attach(false);
+            return;
           }
-
-          const participantIds: string[] = Array.isArray(data.participantIds)
-            ? data.participantIds
-            : [data.createdBy || 'unknown'];
-
-          return {
-            id: docSnap.id,
-            title: data.title || 'Untitled Activity',
-            category: (data.category as ActivityCategory) || 'Campus Hangout',
-            categoryGroup: (data.categoryGroup as 'sports' | 'social' | 'study') || 'social',
-            description: data.description || '',
-            campus: data.campus,
-            venue: data.venue || 'Campus Center',
-            dateTime: data.dateTime || new Date().toISOString(),
-            durationMinutes: Number(data.durationMinutes) || 60,
-            maxParticipants: Number(data.maxParticipants) || 4,
-            skillLevel: (data.skillLevel as SkillLevel) || 'All Levels',
-            createdBy: data.createdBy || '',
-            hostId: data.createdBy || '',
-            hostName: data.hostName || 'Student',
-            hostCollege: data.hostCollege || data.campus || 'CGC',
-            hostAvatarColor: data.hostAvatarColor || '#3A0F34',
-            hostAvatarInitials: data.hostAvatarInitials || 'ST',
-            participantIds,
-            isDemo: false,
-            status: (data.status as Activity['status']) || 'active',
-            createdAt: createdAtISO,
-            isOneToOne: !!data.isOneToOne,
-            matchRequestId: data.matchRequestId,
-            requesterUid: data.requesterUid,
-            requesterName: data.requesterName,
-            endedAt: data.endedAt,
-            endedByUid: data.endedByUid,
-            originalBroadcastExpiresAt: data.originalBroadcastExpiresAt,
-          };
-        });
-
-        // Sort: Active upcoming activities first, then by scheduled date
-        activities.sort((a, b) => {
-          return new Date(a.dateTime).getTime() - new Date(b.dateTime).getTime();
-        });
-
-        onUpdate(activities);
-      },
-      (error) => {
-        if (onError) {
-          onError(error);
+          onError?.(error);
+          try {
+            handleFirestoreError(error, OperationType.GET, this.collectionName);
+          } catch (e) {
+            console.error('Firestore onSnapshot listener error:', e);
+          }
         }
-        try {
-          handleFirestoreError(error, OperationType.GET, this.collectionName);
-        } catch (e) {
-          console.error('Firestore onSnapshot listener error:', e);
-        }
-      }
-    );
+      );
+    };
+
+    attach(true);
+
+    return () => {
+      isDisposed = true;
+      activeUnsub?.();
+    };
   }
 
   /**
@@ -499,8 +819,35 @@ export class ActivityFirestoreService {
   }
 
   /**
+   * Completes an activity in Firestore if the current user is the host/creator.
+   * Updates status to 'completed' and records completedAt and updatedAt.
+   */
+  public async completeActivity(activityId: string, currentUserUid: string): Promise<void> {
+    const currentUid = auth.currentUser?.uid;
+    if (!currentUid) {
+      throw new Error('Authentication required: You must be signed in to complete an activity.');
+    }
+    if (currentUid !== currentUserUid) {
+      throw new Error('Unauthorized: Only the host can mark this activity as completed.');
+    }
+
+    const docPath = `${this.collectionName}/${activityId}`;
+    try {
+      const docRef = doc(db, this.collectionName, activityId);
+      await updateDoc(docRef, {
+        status: 'completed',
+        completedAt: serverTimestamp(),
+        endedAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, docPath);
+    }
+  }
+
+  /**
    * Cancels an activity in Firestore if the current user is the host/creator.
-   * Updates status to 'cancelled' and records updatedAt.
+   * Updates status to 'cancelled' and records cancelledAt and updatedAt.
    */
   public async cancelActivity(activityId: string, currentUserUid: string): Promise<void> {
     const currentUid = auth.currentUser?.uid;
@@ -516,7 +863,8 @@ export class ActivityFirestoreService {
       const docRef = doc(db, this.collectionName, activityId);
       await updateDoc(docRef, {
         status: 'cancelled',
-        updatedAt: new Date().toISOString(),
+        cancelledAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
       });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, docPath);
@@ -593,7 +941,10 @@ export class ActivityFirestoreService {
         matchRequestId: data.matchRequestId,
         requesterUid: data.requesterUid,
         requesterName: data.requesterName,
-        endedAt: data.endedAt,
+        endedAt: typeof data.endedAt === 'string' ? data.endedAt : data.endedAt?.toDate?.() ? data.endedAt.toDate().toISOString() : undefined,
+        completedAt: typeof data.completedAt === 'string' ? data.completedAt : data.completedAt?.toDate?.() ? data.completedAt.toDate().toISOString() : undefined,
+        cancelledAt: typeof data.cancelledAt === 'string' ? data.cancelledAt : data.cancelledAt?.toDate?.() ? data.cancelledAt.toDate().toISOString() : undefined,
+        updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : data.updatedAt?.toDate?.() ? data.updatedAt.toDate().toISOString() : undefined,
         endedByUid: data.endedByUid,
         originalBroadcastExpiresAt: data.originalBroadcastExpiresAt,
       };

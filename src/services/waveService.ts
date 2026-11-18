@@ -246,6 +246,40 @@ export class WaveService {
   }
 
   /**
+   * Cancels a pending outgoing wave sent by the current user.
+   */
+  public async cancelWave(waveId: string): Promise<void> {
+    const firebaseUser = auth.currentUser;
+    if (!firebaseUser || !firebaseUser.uid) {
+      throw new Error('Authentication required: Sign in to cancel a wave.');
+    }
+    const currentUid = firebaseUser.uid;
+    const wavePath = `${this.wavesCollection}/${waveId}`;
+    const waveRef = doc(db, this.wavesCollection, waveId);
+
+    const waveSnap = await getDoc(waveRef);
+    if (!waveSnap.exists()) {
+      throw new Error('Wave request not found.');
+    }
+    const waveData = waveSnap.data();
+    if (waveData.senderUid !== currentUid) {
+      throw new Error('Unauthorized: Only the wave sender can cancel this wave.');
+    }
+    if (waveData.status !== 'pending') {
+      throw new Error(`Cannot cancel a wave that has already been ${waveData.status}.`);
+    }
+
+    try {
+      await updateDoc(waveRef, {
+        status: 'cancelled',
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, wavePath);
+    }
+  }
+
+  /**
    * Subscribes to real-time incoming waves for the current user.
    */
   public subscribeToIncomingWaves(

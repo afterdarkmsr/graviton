@@ -12,9 +12,12 @@ import {
   XCircle,
   Loader2,
   AlertCircle,
+  Star,
 } from 'lucide-react';
 
 import { activityFirestoreService } from '../services/activityService';
+import { getPastActivitiesForUser, isActivityPast } from '../utils/activityRetention';
+import { FeedbackModal } from '../components/FeedbackModal';
 
 interface MyActivitiesScreenProps {
   activities: Activity[];
@@ -22,6 +25,9 @@ interface MyActivitiesScreenProps {
   onSelectActivity: (activity: Activity) => void;
   onExplore: () => void;
   onActivityUpdated: () => void;
+  hasMoreUserActivities?: boolean;
+  isLoadingMore?: boolean;
+  onLoadMoreUserActivities?: () => void;
 }
 
 type TabType = 'attending' | 'hosting' | 'past';
@@ -32,8 +38,12 @@ export const MyActivitiesScreen: React.FC<MyActivitiesScreenProps> = ({
   onSelectActivity,
   onExplore,
   onActivityUpdated,
+  hasMoreUserActivities = false,
+  isLoadingMore = false,
+  onLoadMoreUserActivities,
 }) => {
   const [activeTab, setActiveTab] = useState<TabType>('attending');
+  const [feedbackActivity, setFeedbackActivity] = useState<Activity | null>(null);
 
   const now = Date.now();
 
@@ -41,31 +51,16 @@ export const MyActivitiesScreen: React.FC<MyActivitiesScreenProps> = ({
   const joinedActivities = activities.filter((act) => {
     const isParticipant = act.participantIds.includes(currentUser.id);
     const isHost = act.hostId === currentUser.id || act.createdBy === currentUser.id;
-    const isPast =
-      new Date(act.dateTime).getTime() + act.durationMinutes * 60000 < now ||
-      act.status === 'completed';
-    return isParticipant && !isHost && !isPast && act.status !== 'cancelled';
+    return isParticipant && !isHost && !isActivityPast(act, now) && act.status !== 'cancelled';
   });
 
   const hostedActivities = activities.filter((act) => {
     const isHost = act.hostId === currentUser.id || act.createdBy === currentUser.id;
-    const isPast =
-      new Date(act.dateTime).getTime() + act.durationMinutes * 60000 < now ||
-      act.status === 'completed';
-    return isHost && !isPast && act.status !== 'cancelled';
+    return isHost && !isActivityPast(act, now) && act.status !== 'cancelled';
   });
 
-  const pastActivities = activities.filter((act) => {
-    const isParticipant =
-      act.participantIds.includes(currentUser.id) ||
-      act.hostId === currentUser.id ||
-      act.createdBy === currentUser.id;
-    const isPast =
-      new Date(act.dateTime).getTime() + act.durationMinutes * 60000 < now ||
-      act.status === 'completed' ||
-      act.status === 'cancelled';
-    return isParticipant && isPast;
-  });
+  // Past Squads: Filtered strictly to the most recent 7 days of activity history, sorted newest first
+  const pastActivities = getPastActivitiesForUser(activities, currentUser.id, now);
 
   const [leavingId, setLeavingId] = useState<string | null>(null);
   const [cancellingId, setCancellingId] = useState<string | null>(null);
@@ -237,6 +232,18 @@ export const MyActivitiesScreen: React.FC<MyActivitiesScreenProps> = ({
                         <span className="text-xs font-semibold text-[#EAAA00]">You are Host</span>
                       </>
                     )}
+                    {activeTab === 'past' && (
+                      <>
+                        <span aria-hidden="true">·</span>
+                        <span className={`text-xs font-semibold ${
+                          act.status === 'cancelled'
+                            ? 'text-red-600 dark:text-red-400'
+                            : 'text-slate-500 dark:text-slate-400'
+                        }`}>
+                          {act.status === 'cancelled' ? 'Cancelled' : 'Ended'}
+                        </span>
+                      </>
+                    )}
                   </div>
 
                   <h3 className="text-base font-bold text-[#3A0F34] dark:text-slate-100 group-hover:text-[#52184A] dark:group-hover:text-[#EAAA00] transition-colors leading-snug">
@@ -269,6 +276,21 @@ export const MyActivitiesScreen: React.FC<MyActivitiesScreenProps> = ({
                     <MessageCircle className="w-4 h-4 text-[#3A0F34] dark:text-[#EAAA00]" />
                     <span>Squad Chat</span>
                   </button>
+
+                  {/* Feedback button for past completed squads */}
+                  {activeTab === 'past' && act.status === 'completed' && act.participantIds.length > 1 && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setFeedbackActivity(act);
+                      }}
+                      className="py-2 px-3.5 bg-amber-50 dark:bg-amber-950/40 hover:bg-amber-100 dark:hover:bg-amber-900/50 text-amber-900 dark:text-amber-300 border border-amber-200 dark:border-amber-900/60 text-xs font-semibold rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                      title="Rate and give feedback to squad members"
+                    >
+                      <Star className="w-3.5 h-3.5 fill-current text-[#EAAA00]" />
+                      <span>Feedback</span>
+                    </button>
+                  )}
 
                   {/* Host actions or participant Leave */}
                   {activeTab !== 'past' && (
@@ -316,6 +338,20 @@ export const MyActivitiesScreen: React.FC<MyActivitiesScreenProps> = ({
               </div>
             );
           })}
+
+          {activeTab === 'past' && hasMoreUserActivities && onLoadMoreUserActivities && (
+            <div className="pt-2 flex justify-center">
+              <button
+                type="button"
+                onClick={onLoadMoreUserActivities}
+                disabled={isLoadingMore}
+                className="px-5 py-2.5 rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-bold text-[#3A0F34] dark:text-slate-200 shadow-xs transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {isLoadingMore && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#EAAA00]" />}
+                <span>{isLoadingMore ? 'Loading Older Squads...' : 'Load Older Squads'}</span>
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         /* Empty Tab State */
@@ -328,23 +364,47 @@ export const MyActivitiesScreen: React.FC<MyActivitiesScreenProps> = ({
               ? 'No joined squads yet'
               : activeTab === 'hosting'
               ? 'You are not hosting any squads'
-              : 'No past activities recorded'}
+              : 'No past squads in the last 7 days'}
           </h3>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 mb-5">
             {activeTab === 'attending'
               ? 'Explore upcoming badminton, cricket, coffee or study groups on campus and jump in!'
               : activeTab === 'hosting'
               ? 'Take the lead! Create an activity in under 30 seconds for your campus peers.'
-              : 'Activities you attend will appear here after they conclude.'}
+              : 'Squads and meetups you participated in will appear here for 7 days after concluding.'}
           </p>
-          <button
-            onClick={onExplore}
-            className="inline-flex items-center gap-1.5 py-2.5 px-5 bg-[#EAAA00] hover:bg-[#D69900] text-[#240720] font-bold text-xs rounded-xl shadow-xs transition-all cursor-pointer"
-          >
-            <span>Explore Campus Activities</span>
-            <ArrowRight className="w-3.5 h-3.5" />
-          </button>
+          <div className="flex items-center justify-center gap-2 flex-wrap">
+            <button
+              onClick={onExplore}
+              className="inline-flex items-center gap-1.5 py-2.5 px-5 bg-[#EAAA00] hover:bg-[#D69900] text-[#240720] font-bold text-xs rounded-xl shadow-xs transition-all cursor-pointer"
+            >
+              <span>Explore Campus Activities</span>
+              <ArrowRight className="w-3.5 h-3.5" />
+            </button>
+            {activeTab === 'past' && hasMoreUserActivities && onLoadMoreUserActivities && (
+              <button
+                type="button"
+                onClick={onLoadMoreUserActivities}
+                disabled={isLoadingMore}
+                className="inline-flex items-center gap-1.5 py-2.5 px-4 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 text-[#3A0F34] dark:text-slate-200 border border-slate-200 dark:border-slate-700 font-bold text-xs rounded-xl transition-all cursor-pointer disabled:opacity-50"
+              >
+                {isLoadingMore && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#EAAA00]" />}
+                <span>Load Older Squads</span>
+              </button>
+            )}
+          </div>
         </div>
+      )}
+
+      {/* Squad Feedback Modal */}
+      {feedbackActivity && (
+        <FeedbackModal
+          isOpen={!!feedbackActivity}
+          onClose={() => setFeedbackActivity(null)}
+          activity={feedbackActivity}
+          currentUser={currentUser}
+          onFeedbackSubmitted={onActivityUpdated}
+        />
       )}
     </div>
   );

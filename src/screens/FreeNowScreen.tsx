@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Activity, AvailabilityBroadcast, MatchRequest, UserProfile } from '../types';
+import { Activity, AvailabilityBroadcast, MatchRequest, SuspensionStatusInfo, UserProfile } from '../types';
 import { availabilityService } from '../services/availabilityService';
 import { matchRequestService } from '../services/matchRequestService';
+import { feedbackService } from '../services/feedbackService';
 import {
   Zap,
   Clock,
@@ -29,6 +30,9 @@ interface FreeNowScreenProps {
   onSelectActivity?: (activity: Activity) => void;
   onSelectActivityId?: (activityId: string) => void;
   activities?: Activity[];
+  incomingRequests?: MatchRequest[];
+  outgoingRequests?: MatchRequest[];
+  currentUserSuspension?: SuspensionStatusInfo;
   onToast?: (msg: string, type?: 'success' | 'error' | 'info') => void;
 }
 
@@ -38,6 +42,9 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
   onSelectActivity,
   onSelectActivityId,
   activities,
+  incomingRequests = [],
+  outgoingRequests = [],
+  currentUserSuspension,
   onToast,
 }) => {
   const [broadcasts, setBroadcasts] = useState<AvailabilityBroadcast[]>([]);
@@ -46,9 +53,7 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
   const [isCancelling, setIsCancelling] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  // Match Requests state (Phase 2)
-  const [incomingRequests, setIncomingRequests] = useState<MatchRequest[]>([]);
-  const [outgoingRequests, setOutgoingRequests] = useState<MatchRequest[]>([]);
+  // Match Requests UI state (subscriptions centralized in App.tsx)
   const [requestActionId, setRequestActionId] = useState<string | null>(null);
   const [requestModalPeer, setRequestModalPeer] = useState<AvailabilityBroadcast | null>(null);
   const [requestActivityInterest, setRequestActivityInterest] = useState<string>('');
@@ -111,36 +116,6 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
     };
   }, []);
 
-  // Real-time Firestore Subscriptions for Match Requests (Phase 2)
-  useEffect(() => {
-    if (!currentUser.id) return;
-
-    const unsubIncoming = matchRequestService.subscribeIncomingRequests(
-      currentUser.id,
-      (reqs) => {
-        setIncomingRequests(reqs);
-      },
-      (err) => {
-        console.warn('Incoming match requests subscription warning:', err);
-      }
-    );
-
-    const unsubOutgoing = matchRequestService.subscribeOutgoingRequests(
-      currentUser.id,
-      (reqs) => {
-        setOutgoingRequests(reqs);
-      },
-      (err) => {
-        console.warn('Outgoing match requests subscription warning:', err);
-      }
-    );
-
-    return () => {
-      unsubIncoming();
-      unsubOutgoing();
-    };
-  }, [currentUser.id]);
-
   // Active 1-to-1 match for current user (Phase 3)
   const activeOneToOneMatch = useMemo(() => {
     if (!activities) return null;
@@ -154,26 +129,6 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
       ) || null
     );
   }, [activities, currentUser.id]);
-
-  // Requester auto-navigation on match acceptance (once per match, without repeat forced redirect on refresh)
-  useEffect(() => {
-    const acceptedRequest = outgoingRequests.find(
-      (r) => r.status === 'accepted' && r.activityId
-    );
-    if (acceptedRequest && acceptedRequest.activityId) {
-      const navKey = `navigated_match_${acceptedRequest.id}`;
-      if (!sessionStorage.getItem(navKey)) {
-        sessionStorage.setItem(navKey, 'true');
-        onToast?.('Your match request was accepted! Taking you directly to Squad Chat...', 'success');
-        if (onSelectActivityId) {
-          onSelectActivityId(acceptedRequest.activityId);
-        } else if (onSelectActivity) {
-          const act = activities?.find((a) => a.id === acceptedRequest.activityId);
-          if (act) onSelectActivity(act);
-        }
-      }
-    }
-  }, [outgoingRequests, onSelectActivityId, onSelectActivity, activities, onToast]);
 
   // Derive current user's active broadcast
   const myBroadcast = useMemo(() => {
@@ -211,6 +166,17 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
     setErrorMessage(null);
     setIsSubmitting(true);
     try {
+      // Check authoritative userModeration suspension standing
+      const susp = await feedbackService.getSuspensionStatusStrict(currentUser.id);
+      if (susp.isSuspended || currentUserSuspension?.isSuspended) {
+        const exp = susp.expiresAt || currentUserSuspension?.expiresAt;
+        throw new Error(
+          `Account suspended: You cannot broadcast availability while under temporary suspension (expires ${
+            exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+          }).`
+        );
+      }
+
       const activeInterest = isCustomInterest
         ? customInterestText.trim() || 'Campus Hangout'
         : selectedInterest || 'Campus Hangout';
@@ -262,9 +228,30 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
   };
 
   // Match Request Handlers (Phase 2)
-  const handleOpenRequestModal = (peer: AvailabilityBroadcast) => {
+  const handleOpenRequestModal = async (peer: AvailabilityBroadcast) => {
     if (peer.ownerUid === currentUser.id) {
       onToast?.('You cannot request a match with yourself.', 'error');
+      return;
+    }
+
+    // Check authoritative userModeration suspension standing
+    try {
+      const susp = await feedbackService.getSuspensionStatusStrict(currentUser.id);
+      if (susp.isSuspended || currentUserSuspension?.isSuspended) {
+        const exp = susp.expiresAt || currentUserSuspension?.expiresAt;
+        onToast?.(
+          `Account suspended: You cannot send match requests while under temporary suspension (expires ${
+            exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+          }).`,
+          'error'
+        );
+        return;
+      }
+    } catch (err) {
+      onToast?.(
+        err instanceof Error ? err.message : 'Unable to verify account standing.',
+        'error'
+      );
       return;
     }
 
@@ -341,7 +328,7 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
     try {
       const activityId = await matchRequestService.acceptMatchRequest(req.id, currentUser);
       onToast?.(`Match accepted with ${req.requesterName}! Entering Squad Chat...`, 'success');
-      sessionStorage.setItem(`navigated_match_${req.id}`, 'true');
+      localStorage.setItem(`navigated_match_${req.id}`, 'true');
       if (onSelectActivityId) {
         onSelectActivityId(activityId);
       } else if (onSelectActivity) {
@@ -386,15 +373,15 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
     <div className="max-w-4xl mx-auto px-4 sm:px-6 py-6 pb-28 md:pb-12 space-y-6">
       {/* Error notification banner */}
       {errorMessage && (
-        <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-2xl flex items-start gap-3 shadow-xs">
-          <AlertCircle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+        <div className="bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 text-red-700 dark:text-red-300 px-4 py-3 rounded-2xl flex items-start gap-3 shadow-xs">
+          <AlertCircle className="w-5 h-5 text-red-500 dark:text-red-400 shrink-0 mt-0.5" />
           <div className="flex-1 text-xs">
             <span className="font-bold block">Availability Notice:</span>
             <span>{errorMessage}</span>
           </div>
           <button
             onClick={() => setErrorMessage(null)}
-            className="text-red-400 hover:text-red-600 text-xs font-semibold"
+            className="text-red-500 dark:text-red-400 hover:text-red-700 dark:hover:text-red-200 text-xs font-semibold cursor-pointer"
           >
             Dismiss
           </button>

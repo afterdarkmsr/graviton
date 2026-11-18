@@ -6,10 +6,12 @@ import {
 import {
   doc,
   getDoc,
+  getDocFromCache,
   setDoc,
 } from 'firebase/firestore';
 import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../lib/firebase';
 import { UserProfile } from '../types';
+import { storageService } from './storageService';
 
 export class AuthService {
   /**
@@ -64,15 +66,15 @@ export class AuthService {
    */
   public async getUserProfile(userId: string): Promise<UserProfile | null> {
     const docPath = `users/${userId}`;
+    const docRef = doc(db, 'users', userId);
     try {
-      const docRef = doc(db, 'users', userId);
       const snapshot = await getDoc(docRef);
 
       if (!snapshot.exists()) {
         return null;
       }
 
-      const data = snapshot.data();
+      const data: Record<string, any> = snapshot.data();
       const existingCampus = data.campus || data.college;
       return {
         id: userId,
@@ -100,6 +102,49 @@ export class AuthService {
         updatedAt: data.updatedAt || new Date().toISOString(),
       };
     } catch (err) {
+      // If offline or network unavailable, attempt to load from Firestore cache
+      try {
+        const cachedSnap = await getDocFromCache(docRef);
+        if (cachedSnap.exists()) {
+          const data: Record<string, any> = cachedSnap.data();
+          const existingCampus = data.campus || data.college;
+          return {
+            id: userId,
+            userId: userId,
+            email: data.email || '',
+            name: data.name || '',
+            ...(existingCampus ? { campus: existingCampus, college: existingCampus } : {}),
+            year: data.year || '1st Year',
+            bio: data.bio || '',
+            avatarColor: data.avatarColor || '#3A0F34',
+            avatarInitials: data.avatarInitials || 'ST',
+            interests: data.interests || [],
+            skillLevels: data.skillLevels || {},
+            typicalAvailability: data.typicalAvailability || [],
+            privacyPreferences: data.privacyPreferences || {
+              showCollegeToCampusPeers: true,
+              onlyMatchCompatibleSkills: false,
+              allowDirectInvites: true,
+            },
+            freeUntil: data.freeUntil || null,
+            freeStatusNote: data.freeStatusNote || null,
+            isOnboarded: data.isOnboarded ?? true,
+            isSampleUser: false,
+            createdAt: data.createdAt || new Date().toISOString(),
+            updatedAt: data.updatedAt || new Date().toISOString(),
+          };
+        }
+      } catch {
+        // Cache read missed
+      }
+
+      // Check localStorage cached profile as reliable offline fallback
+      const localCached = storageService.getProfile();
+      if (localCached && (localCached.id === userId || localCached.userId === userId)) {
+        console.warn('Network offline: using cached local profile for', userId);
+        return localCached;
+      }
+
       handleFirestoreError(err, OperationType.GET, docPath);
     }
   }

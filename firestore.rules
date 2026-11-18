@@ -28,6 +28,39 @@ service cloud.firestore {
       return resource.data;
     }
 
+    function isAdminClaim() {
+      return isSignedIn()
+        && request.auth.token != null
+        && ('admin' in request.auth.token && request.auth.token.admin == true);
+    }
+
+    // Moderation & Suspension Guard:
+    // Returns true if the user currently has an active 15-day suspension
+    function isSuspended(userId) {
+      return (
+        exists(/databases/$(database)/documents/userModeration/$(userId))
+        && get(/databases/$(database)/documents/userModeration/$(userId)).data.isSuspended == true
+        && (
+          !('suspensionExpiresAt' in get(/databases/$(database)/documents/userModeration/$(userId)).data)
+          || get(/databases/$(database)/documents/userModeration/$(userId)).data.suspensionExpiresAt == null
+          || (get(/databases/$(database)/documents/userModeration/$(userId)).data.suspensionExpiresAt is timestamp
+              && request.time < get(/databases/$(database)/documents/userModeration/$(userId)).data.suspensionExpiresAt)
+        )
+      ) || (
+        !exists(/databases/$(database)/documents/userModeration/$(userId))
+        && exists(/databases/$(database)/documents/userReputations/$(userId))
+        && ('isSuspended' in get(/databases/$(database)/documents/userReputations/$(userId)).data)
+        && get(/databases/$(database)/documents/userReputations/$(userId)).data.isSuspended == true
+        && (
+          !('suspensionExpiresAt' in get(/databases/$(database)/documents/userReputations/$(userId)).data)
+          || get(/databases/$(database)/documents/userReputations/$(userId)).data.suspensionExpiresAt == null
+          || (get(/databases/$(database)/documents/userReputations/$(userId)).data.suspensionExpiresAt is timestamp
+              && request.time < get(/databases/$(database)/documents/userReputations/$(userId)).data.suspensionExpiresAt)
+        )
+      );
+    }
+
+
     // -------------------------------------------------------------
     // USER PROFILES
     // -------------------------------------------------------------
@@ -123,7 +156,9 @@ service cloud.firestore {
         && (!('matchRequestId' in data) || (data.matchRequestId is string && data.matchRequestId.size() <= 128))
         && (!('requesterUid' in data) || (data.requesterUid is string && data.requesterUid.size() <= 128))
         && (!('requesterName' in data) || (data.requesterName is string && data.requesterName.size() <= 100))
-        && (!('endedAt' in data) || (data.endedAt is string && data.endedAt.size() <= 50))
+        && (!('endedAt' in data) || data.endedAt is timestamp || (data.endedAt is string && data.endedAt.size() <= 50))
+        && (!('completedAt' in data) || data.completedAt is timestamp || (data.completedAt is string && data.completedAt.size() <= 50))
+        && (!('cancelledAt' in data) || data.cancelledAt is timestamp || (data.cancelledAt is string && data.cancelledAt.size() <= 50))
         && (!('endedByUid' in data) || (data.endedByUid is string && data.endedByUid.size() <= 128))
         && (!('originalBroadcastExpiresAt' in data) || data.originalBroadcastExpiresAt is number)
         && (!('createdAt' in data) || data.createdAt is timestamp || data.createdAt is string)
@@ -133,8 +168,9 @@ service cloud.firestore {
     // 1. Validates strict initial activity creation
     function isValidNewActivity(data, activityId) {
       return isValidActivityShape(data)
-        // Creator must match the authenticated user
+        // Creator must match the authenticated user and NOT be suspended
         && data.createdBy == request.auth.uid
+        && !isSuspended(request.auth.uid)
         // Initial status must strictly be 'active'
         && data.status == 'active'
         && (
@@ -171,33 +207,63 @@ service cloud.firestore {
         // Host CANNOT reactivate cancelled or completed activities
         && existing().status != 'cancelled'
         && existing().status != 'completed'
-        // Capacity validation: must remain an integer between 2 and 50 and at least current enrollment
-        && incoming().maxParticipants is int
-        && incoming().maxParticipants >= 2
-        && incoming().maxParticipants <= 50
-        && incoming().maxParticipants >= existing().participantIds.size()
-        // Status consistency after host edits:
-        && (
-          // Host may transition to terminal states (cancelled or completed)
-          (incoming().status == 'cancelled' || incoming().status == 'completed')
-          ||
-          // If not cancelled/completed, status MUST strictly match current enrollment vs capacity
-          (incoming().status == (existing().participantIds.size() >= incoming().maxParticipants ? 'full' : 'active'))
-        )
         // createdAt timestamp is immutable
         && (!('createdAt' in existing()) || incoming().createdAt == existing().createdAt)
-        // Permitted editable fields only
-        && incoming().diff(existing()).affectedKeys().hasOnly([
-          'title', 'description', 'venue', 'dateTime', 'durationMinutes',
-          'skillLevel', 'category', 'categoryGroup', 'campus', 'status',
-          'maxParticipants', 'updatedAt'
-        ])
-        && isValidActivityShape(incoming());
+        && (
+          // Path A: Host marks an active or full squad as completed
+          (
+            (existing().status == 'active' || existing().status == 'full')
+            && incoming().status == 'completed'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'completedAt', 'endedAt', 'updatedAt'
+            ])
+            && incoming().completedAt is timestamp
+            && incoming().completedAt == request.time
+            && incoming().endedAt is timestamp
+            && incoming().endedAt == request.time
+            && incoming().updatedAt is timestamp
+            && incoming().updatedAt == request.time
+            && isValidActivityShape(incoming())
+          )
+          ||
+          // Path B: Host edits editable details or cancels an active/full activity
+          (
+            incoming().status != 'completed'
+            && incoming().maxParticipants is int
+            && incoming().maxParticipants >= 2
+            && incoming().maxParticipants <= 50
+            && incoming().maxParticipants >= existing().participantIds.size()
+            && (
+              incoming().status == 'cancelled'
+              || incoming().status == (existing().participantIds.size() >= incoming().maxParticipants ? 'full' : 'active')
+            )
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'description', 'venue', 'dateTime', 'durationMinutes',
+              'skillLevel', 'category', 'categoryGroup', 'campus', 'status',
+              'maxParticipants', 'updatedAt', 'cancelledAt'
+            ])
+            && (
+              !incoming().diff(existing()).affectedKeys().hasAny(['cancelledAt'])
+              || (incoming().status == 'cancelled' && incoming().cancelledAt is timestamp && incoming().cancelledAt == request.time)
+            )
+            && (
+              incoming().status != 'cancelled'
+              || ('cancelledAt' in incoming() && incoming().cancelledAt is timestamp && incoming().cancelledAt == request.time)
+            )
+            && (
+              !incoming().diff(existing()).affectedKeys().hasAny(['updatedAt'])
+              || (incoming().updatedAt is timestamp && incoming().updatedAt == request.time)
+            )
+            && isValidActivityShape(incoming())
+          )
+        );
     }
 
     // 3. Validates atomic join actions by non-host students
     function isJoinAction() {
       return isSignedIn()
+        // Suspended students cannot join squads
+        && !isSuspended(request.auth.uid)
         // Host cannot join as regular participant (already creator)
         && request.auth.uid != existing().createdBy
         // Must not already be enrolled in squad (prevents duplicate membership)
@@ -219,7 +285,7 @@ service cloud.firestore {
         && incoming().createdBy == existing().createdBy
         && incoming().title == existing().title
         && incoming().venue == existing().venue
-        && incoming().dateTime == existing().dateTime
+        && (!('dateTime' in existing()) || incoming().dateTime == existing().dateTime)
         && incoming().maxParticipants == existing().maxParticipants;
     }
 
@@ -244,7 +310,7 @@ service cloud.firestore {
         && incoming().createdBy == existing().createdBy
         && incoming().title == existing().title
         && incoming().venue == existing().venue
-        && incoming().dateTime == existing().dateTime
+        && (!('dateTime' in existing()) || incoming().dateTime == existing().dateTime)
         && incoming().maxParticipants == existing().maxParticipants;
     }
 
@@ -252,11 +318,20 @@ service cloud.firestore {
     function isEndOneToOneAction() {
       return isSignedIn()
         && ('isOneToOne' in existing() && existing().isOneToOne == true)
+        && (existing().status == 'active' || existing().status == 'full')
+        && existing().status != 'completed'
+        && existing().status != 'cancelled'
         && existing().participantIds.hasAny([request.auth.uid])
         && (incoming().status == 'completed' || incoming().status == 'cancelled')
         && incoming().participantIds == existing().participantIds
-        && incoming().createdBy == existing().createdBy;
+        && incoming().createdBy == existing().createdBy
+        && ('endedByUid' in incoming() && incoming().endedByUid == request.auth.uid)
+        && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'endedAt', 'completedAt', 'cancelledAt', 'endedByUid', 'updatedAt'])
+        && incoming().title == existing().title
+        && incoming().venue == existing().venue
+        && incoming().maxParticipants == existing().maxParticipants;
     }
+
 
     match /activities/{activityId} {
       // Authenticated campus students can discover activities
@@ -337,14 +412,17 @@ service cloud.firestore {
 
       allow create: if isOwner(userId)
         && isValidId(userId)
+        && !isSuspended(request.auth.uid)
         && incoming().ownerUid == request.auth.uid;
 
       allow update: if isOwner(userId)
         && isValidId(userId)
+        && (!('isActive' in incoming()) || incoming().isActive == false || !isSuspended(request.auth.uid))
         && incoming().ownerUid == request.auth.uid;
 
       allow delete: if isOwner(userId) && isValidId(userId);
     }
+
 
     // -------------------------------------------------------------
     // WAVES: /waves/{waveId}
@@ -355,23 +433,31 @@ service cloud.firestore {
 
       allow create: if isSignedIn()
         && isValidId(waveId)
+        && !isSuspended(request.auth.uid)
         && incoming().senderUid == request.auth.uid
         && incoming().recipientUid != request.auth.uid
         && incoming().status == 'pending';
 
+
       allow update: if isSignedIn()
         && isValidId(waveId)
+        && existing().status == 'pending'
         && (
           // Recipient accepts or declines
           (
             existing().recipientUid == request.auth.uid
-            && (incoming().status == 'accepted' || incoming().status == 'declined')
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'chatId', 'updatedAt'])
+            && (
+              (incoming().status == 'accepted' && !isSuspended(request.auth.uid))
+              || incoming().status == 'declined'
+            )
           )
           ||
           // Sender cancels
           (
             existing().senderUid == request.auth.uid
             && incoming().status == 'cancelled'
+            && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
           )
         );
 
@@ -393,7 +479,9 @@ service cloud.firestore {
 
       allow update: if isSignedIn()
         && isValidId(chatId)
-        && request.auth.uid in existing().participantUids;
+        && request.auth.uid in existing().participantUids
+        && incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageText', 'lastMessageAt', 'updatedAt'])
+        && incoming().participantUids == existing().participantUids;
 
       allow delete: if false;
 
@@ -433,9 +521,10 @@ service cloud.firestore {
       allow get: if isSignedIn() && (resource.data.requesterUid == request.auth.uid || resource.data.hostUid == request.auth.uid);
       allow list: if isSignedIn() && (resource.data.requesterUid == request.auth.uid || resource.data.hostUid == request.auth.uid);
 
-      // Create: authenticated requester requesting a different host
+      // Create: authenticated requester requesting a different host (must not be suspended)
       allow create: if isSignedIn()
         && isValidId(requestId)
+        && !isSuspended(request.auth.uid)
         && isValidMatchRequest(incoming());
 
       // Update:
@@ -494,6 +583,137 @@ service cloud.firestore {
       // Delete: disabled
       allow delete: if false;
     }
+
+    // -------------------------------------------------------------
+    // PRIVATE FEEDBACK: /feedbackPrivate/{feedbackId}
+    // Sensitive individual reviews, rater identities, and comments.
+    // Client reads and writes are strictly denied.
+    // Submissions and queries managed exclusively by trusted Cloud Functions.
+    // -------------------------------------------------------------
+    match /feedbackPrivate/{feedbackId} {
+      allow read, write: if false;
+    }
+
+    // Legacy Feedback Collection: /feedback/{feedbackId}
+    match /feedback/{feedbackId} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------
+    // USER REPUTATIONS: /userReputations/{userId}
+    // Public aggregate ratings, star breakdown, and tag counts.
+    // Client writes are completely denied. Calculations are strictly
+    // executed on the backend via Firebase Admin SDK.
+    // -------------------------------------------------------------
+    match /userReputations/{userId} {
+      // Public aggregates: all signed-in students can view peer rating score and tag counts
+      allow get, list: if isSignedIn();
+
+      // Clients cannot tamper with reputation aggregates
+      allow create, update, delete: if false;
+    }
+
+    // -------------------------------------------------------------
+    // USER MODERATION: /userModeration/{userId}
+    // Private moderation records (distinct 1-star raters, suspension expiry, appeals).
+    // Reads strictly limited to the affected student or verified campus admin.
+    // All client writes are strictly denied.
+    // -------------------------------------------------------------
+    match /userModeration/{userId} {
+      // Affected student can view their own moderation status; admins can inspect
+      allow get: if isSignedIn()
+        && (request.auth.uid == userId || (request.auth.token != null && ('admin' in request.auth.token && request.auth.token.admin == true)));
+      allow list: if isSignedIn()
+        && request.auth.token != null && ('admin' in request.auth.token && request.auth.token.admin == true);
+
+      // Writes are strictly denied to clients
+      allow create, update, delete: if false;
+    }
+
+    // -------------------------------------------------------------
+    // SUSPENSIONS & MODERATION: /suspensions/{suspensionId}
+    // Automatic 15-day temporary suspensions and appeal records.
+    // Client writes are completely denied. Created and managed
+    // exclusively by trusted backend Cloud Functions.
+    // -------------------------------------------------------------
+    match /suspensions/{suspensionId} {
+      // Affected student or verified admin can view the suspension record
+      allow get, list: if isSignedIn()
+        && (resource.data.userId == request.auth.uid || (request.auth.token != null && ('admin' in request.auth.token && request.auth.token.admin == true)));
+
+      // Clients cannot self-impose, postpone, or alter suspension documents directly
+      allow create, update, delete: if false;
+    }
+
+    // -------------------------------------------------------------
+    // SAFETY REPORTS: /reports/{reportId}
+    // Persistent activity safety reporting queue.
+    // Signed-in students may create 'open' reports for existing activities.
+    // Reads and triage updates are strictly limited to trusted admins.
+    // -------------------------------------------------------------
+    match /reports/{reportId} {
+      function isValidNewReport(data) {
+        return data.keys().hasAll([
+            'activityId', 'activityTitle', 'reporterUid', 'reason', 'details', 'status', 'createdAt', 'updatedAt'
+          ])
+          && data.keys().hasOnly([
+            'activityId', 'activityTitle', 'reporterUid', 'reason', 'details', 'status', 'createdAt', 'updatedAt'
+          ])
+          && data.reporterUid is string && data.reporterUid == request.auth.uid
+          && data.status == 'open'
+          && data.createdAt is timestamp && data.createdAt == request.time
+          && data.updatedAt is timestamp && data.updatedAt == request.time
+          && data.activityId is string && isValidId(data.activityId)
+          && data.activityTitle is string && data.activityTitle.size() >= 1 && data.activityTitle.size() <= 150
+          && data.reason is string && data.reason in [
+            'Inappropriate content',
+            'Spam or commercial',
+            'Non-public or private venue',
+            'Harassment',
+            'Other'
+          ]
+          && data.details is string && data.details.size() <= 1000
+          && exists(/databases/$(database)/documents/activities/$(data.activityId));
+      }
+
+      function isValidReportTriageUpdate() {
+        return incoming().keys().hasAll([
+            'activityId', 'activityTitle', 'reporterUid', 'reason', 'details',
+            'status', 'createdAt', 'updatedAt', 'reviewedByAdmin', 'reviewedAt'
+          ])
+          && incoming().keys().hasOnly([
+            'activityId', 'activityTitle', 'reporterUid', 'reason', 'details',
+            'status', 'createdAt', 'updatedAt', 'reviewedByAdmin', 'reviewedAt', 'adminNote'
+          ])
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'status', 'reviewedByAdmin', 'reviewedAt', 'adminNote', 'updatedAt'
+          ])
+          && incoming().activityId == existing().activityId
+          && incoming().activityTitle == existing().activityTitle
+          && incoming().reporterUid == existing().reporterUid
+          && incoming().reason == existing().reason
+          && incoming().details == existing().details
+          && incoming().createdAt == existing().createdAt
+          && incoming().status in ['reviewed', 'dismissed']
+          && incoming().reviewedByAdmin is string && incoming().reviewedByAdmin == request.auth.uid
+          && incoming().reviewedAt is timestamp && incoming().reviewedAt == request.time
+          && incoming().updatedAt is timestamp && incoming().updatedAt == request.time
+          && (!('adminNote' in incoming()) || (incoming().adminNote is string && incoming().adminNote.size() <= 500));
+      }
+
+      allow get, list: if isAdminClaim();
+
+      allow create: if isSignedIn()
+        && isValidId(reportId)
+        && isValidNewReport(incoming());
+
+      allow update: if isAdminClaim()
+        && isValidId(reportId)
+        && isValidReportTriageUpdate();
+
+      allow delete: if false;
+    }
+
   }
 }
 

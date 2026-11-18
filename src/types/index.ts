@@ -76,6 +76,9 @@ export interface Activity {
   requesterUid?: string;
   requesterName?: string;
   endedAt?: string;
+  completedAt?: string;
+  cancelledAt?: string;
+  updatedAt?: string;
   endedByUid?: string;
   originalBroadcastExpiresAt?: number;
 }
@@ -142,7 +145,7 @@ export interface MatchRecommendation {
   isTopPick: boolean;
 }
 
-export type ActiveTab = 'discover' | 'free_now' | 'create' | 'my_activities' | 'profile';
+export type ActiveTab = 'discover' | 'free_now' | 'create' | 'my_activities' | 'profile' | 'admin_appeals';
 
 export type MatchRequestStatus = 'pending' | 'declined' | 'cancelled' | 'accepted' | 'ended';
 
@@ -214,20 +217,40 @@ export interface PrivateChat {
 
 export type RatingStarValue = 1 | 2 | 3 | 4 | 5;
 
-export interface ActivityRating {
-  id: string; // `${activityId}_${reviewerUid}_${revieweeUid}`
+export type FeedbackTag =
+  | 'Friendly'
+  | 'Punctual'
+  | 'Cooperative'
+  | 'Good Communicator'
+  | 'Unfriendly'
+  | 'Not Cooperative';
+
+export const FEEDBACK_TAGS: FeedbackTag[] = [
+  'Friendly',
+  'Punctual',
+  'Cooperative',
+  'Good Communicator',
+  'Unfriendly',
+  'Not Cooperative',
+];
+
+export interface ActivityFeedback {
+  id: string; // `${activityId}_${raterId}_${targetUserId}`
   activityId: string;
   activityTitle: string;
   isOneToOne: boolean;
-  reviewerUid: string;
-  reviewerName: string;
-  revieweeUid: string;
-  revieweeName: string;
-  stars: RatingStarValue;
-  feedbackNote?: string;
-  quickTags?: string[];
+  raterId: string;
+  raterName: string;
+  targetUserId: string;
+  targetUserName: string;
+  rating: RatingStarValue;
+  tags: FeedbackTag[];
+  comment?: string;
   createdAt: any;
 }
+
+// Backward compatibility alias
+export type ActivityRating = ActivityFeedback;
 
 export type ReviewStatus = 'normal' | 'flagged' | 'under_review' | 'cleared' | 'suspended';
 
@@ -244,14 +267,94 @@ export interface SuspensionDetails {
 export interface UserReputation {
   userId: string;
   userName: string;
-  averageRating: number; // e.g. 4.2
+  averageRating: number; // e.g. 4.8
   totalRatings: number;
-  starDistribution: Record<1 | 2 | 3 | 4 | 5, number>;
-  distinctOneStarReviewers: string[]; // List of unique reviewer UIDs giving 1 star
-  flaggedForReview: boolean;
-  reviewStatus: ReviewStatus;
-  suspensionDetails?: SuspensionDetails;
+  ratingSum: number;
+  starDistribution: Record<RatingStarValue, number>;
+  tagCounts: Record<FeedbackTag, number>;
   updatedAt: any;
+  // Backward compatibility fields (optional)
+  isSuspended?: boolean;
+  appealStatus?: 'none' | 'submitted' | 'rejected' | 'accepted';
 }
 
+export interface UserModeration {
+  userId: string;
+  userName?: string;
+  distinctOneStarRaters?: string[];
+  distinctOneStarCount?: number;
+  isSuspended: boolean;
+  suspensionStartedAt?: any;
+  suspensionExpiresAt?: any;
+  suspensionReason?: string | null;
+  appealStatus?: 'none' | 'submitted' | 'rejected' | 'accepted';
+  appealReason?: string | null;
+  appealedAt?: any;
+  reviewedByAdmin?: string | null;
+  reviewedAt?: any;
+  reviewNote?: string | null;
+  suspensionLiftedAt?: any;
+  updatedAt?: any;
+}
 
+export interface SuspensionRecord {
+  id: string;
+  userId: string;
+  userName: string;
+  reason: string;
+  startedAt: any;
+  expiresAt: any;
+  triggeringRatingRefs: string[];
+  status: 'active' | 'appealed' | 'expired' | 'resolved';
+  appealReason?: string;
+  appealedAt?: any;
+  reviewedAt?: any;
+  reviewerUid?: string;
+  reviewNote?: string;
+  createdAt: any;
+}
+
+export interface PendingSuspensionAppeal {
+  userId: string;
+  userName: string;
+  userEmail?: string;
+  isSuspended: boolean;
+  suspensionReason: string;
+  suspensionExpiresAt?: string | null;
+  appealStatus: 'submitted' | 'accepted' | 'rejected' | 'none';
+  appealReason: string;
+  appealedAt?: string | null;
+  distinctOneStarCount?: number;
+}
+
+export type ReportReason =
+  | 'Inappropriate content'
+  | 'Spam or commercial'
+  | 'Non-public or private venue'
+  | 'Harassment'
+  | 'Other';
+
+export type ReportStatus = 'open' | 'reviewed' | 'dismissed';
+
+export interface ActivityReport {
+  id: string;
+  activityId: string;
+  activityTitle: string;
+  reporterUid: string;
+  reason: ReportReason;
+  details: string;
+  status: ReportStatus;
+  reviewedByAdmin?: string;
+  reviewedAt?: string;
+  adminNote?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SuspensionStatusInfo {
+  isSuspended: boolean;
+  expiresAt?: string | null;
+  reason?: string | null;
+  remainingDays?: number;
+  appealStatus?: 'none' | 'submitted' | 'rejected' | 'accepted';
+}

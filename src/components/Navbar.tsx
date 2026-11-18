@@ -1,6 +1,6 @@
 import React from 'react';
 import { ActiveTab, UserProfile } from '../types';
-import { Compass, Zap, Plus, CalendarCheck, User, Sparkles } from 'lucide-react';
+import { Compass, Zap, Plus, CalendarCheck, User, ShieldAlert } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
 
 interface NavbarProps {
@@ -8,8 +8,8 @@ interface NavbarProps {
   onTabChange: (tab: ActiveTab) => void;
   profile: UserProfile;
   joinedCount: number;
-  onOpenRescueModal: () => void;
   incomingMatchRequestsCount?: number;
+  isAdmin?: boolean;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -17,8 +17,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onTabChange,
   profile,
   joinedCount,
-  onOpenRescueModal,
   incomingMatchRequestsCount = 0,
+  isAdmin = false,
 }) => {
   const isFreeNowActive = profile.freeUntil && profile.freeUntil > Date.now();
 
@@ -108,22 +108,39 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               Profile
             </button>
+            {isAdmin && (
+              <button
+                onClick={() => onTabChange('admin_appeals')}
+                className={`hover:text-[#3A0F34] dark:hover:text-white transition-colors whitespace-nowrap shrink-0 py-1 border-b-2 flex items-center gap-1.5 cursor-pointer ${
+                  currentTab === 'admin_appeals'
+                    ? 'border-[#3A0F34] text-[#3A0F34] dark:border-[#EAAA00] dark:text-[#EAAA00] font-bold'
+                    : 'border-transparent text-amber-700 dark:text-amber-400 font-semibold'
+                }`}
+              >
+                <ShieldAlert className="w-3.5 h-3.5" />
+                <span>Appeals</span>
+              </button>
+            )}
           </nav>
 
-          {/* Zone 3: Actions (Theme Toggle + Rescue Me + Profile) */}
+          {/* Zone 3: Actions (Theme Toggle + Admin + Profile) */}
           <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0">
+            {isAdmin && (
+              <button
+                onClick={() => onTabChange('admin_appeals')}
+                className={`w-9 h-9 rounded-xl flex items-center justify-center transition-all cursor-pointer ${
+                  currentTab === 'admin_appeals'
+                    ? 'bg-[#3A0F34] text-[#EAAA00] ring-2 ring-[#EAAA00]'
+                    : 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-900/60'
+                }`}
+                title="Review Suspension Appeals (Admin)"
+                aria-label="Admin Appeals"
+              >
+                <ShieldAlert className="w-4 h-4" />
+              </button>
+            )}
             {/* Theme Toggle Button (Available on both desktop & mobile top header) */}
             <ThemeToggle />
-
-            <button
-              onClick={onOpenRescueModal}
-              className="min-h-[40px] px-3 sm:px-4 py-2 bg-[#EAAA00] hover:bg-[#D69900] active:scale-95 text-[#240720] font-bold text-xs sm:text-sm rounded-xl shadow-sm transition-all flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-              title="Find spontaneous activities matching your profile right now"
-            >
-              <Sparkles className="w-4 h-4 fill-[#240720]" />
-              <span className="hidden sm:inline">Rescue Me</span>
-              <span className="sm:hidden">Rescue</span>
-            </button>
 
             {/* Profile Avatar Quick Click */}
             <button

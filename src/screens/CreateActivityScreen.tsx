@@ -1,10 +1,12 @@
 import React, { useState } from 'react';
-import { ActivityCategory, SkillLevel, UserProfile } from '../types';
+import { ActivityCategory, SkillLevel, SuspensionStatusInfo, UserProfile } from '../types';
 import { CATEGORIES_CONFIG, VENUE_SUGGESTIONS } from '../data/seedData';
-import { Sparkles, MapPin, AlertCircle, Plus, Loader2 } from 'lucide-react';
+import { Sparkles, MapPin, AlertCircle, Plus, Loader2, ShieldAlert } from 'lucide-react';
+import { feedbackService } from '../services/feedbackService';
 
 interface CreateActivityScreenProps {
   currentUser: UserProfile;
+  currentUserSuspension?: SuspensionStatusInfo;
   prefill?: {
     suggestedNote?: string;
     venueHint?: string;
@@ -26,6 +28,7 @@ interface CreateActivityScreenProps {
 
 export const CreateActivityScreen: React.FC<CreateActivityScreenProps> = ({
   currentUser,
+  currentUserSuspension,
   prefill,
   onCreate,
   onCancel,
@@ -50,6 +53,38 @@ export const CreateActivityScreen: React.FC<CreateActivityScreenProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // Suspension status
+  const [isSuspended, setIsSuspended] = useState(Boolean(currentUserSuspension?.isSuspended));
+  const [suspensionExpiry, setSuspensionExpiry] = useState<string | null>(
+    currentUserSuspension?.expiresAt || null
+  );
+
+  React.useEffect(() => {
+    if (currentUserSuspension) {
+      setIsSuspended(currentUserSuspension.isSuspended);
+      setSuspensionExpiry(currentUserSuspension.expiresAt || null);
+    }
+  }, [currentUserSuspension?.isSuspended, currentUserSuspension?.expiresAt]);
+
+  React.useEffect(() => {
+    if (!currentUser?.id) return;
+    let active = true;
+    feedbackService
+      .getSuspensionStatusStrict(currentUser.id)
+      .then((susp) => {
+        if (!active) return;
+        setIsSuspended(susp.isSuspended);
+        setSuspensionExpiry(susp.expiresAt || null);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setError(err instanceof Error ? err.message : 'Unable to verify account moderation status.');
+      });
+    return () => {
+      active = false;
+    };
+  }, [currentUser?.id]);
+
   // Suggested campus venues
   const campusVenues = [
     ...(VENUE_SUGGESTIONS['CGC Jhanjeri'] || []),
@@ -66,6 +101,15 @@ export const CreateActivityScreen: React.FC<CreateActivityScreenProps> = ({
     e.preventDefault();
     if (isSubmitting) return;
     setError(null);
+
+    if (isSuspended) {
+      setError(
+        `Account suspended: You cannot create squads while your account is under temporary suspension (expires ${
+          suspensionExpiry ? new Date(suspensionExpiry).toLocaleDateString() : 'in 15 days'
+        }).`
+      );
+      return;
+    }
 
     if (!title.trim() || title.trim().length < 5) {
       setError('Please provide a descriptive title (at least 5 characters).');
@@ -146,6 +190,18 @@ export const CreateActivityScreen: React.FC<CreateActivityScreenProps> = ({
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-6">
+          {isSuspended && (
+            <div className="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-900/60 rounded-2xl flex items-start gap-2.5 text-xs text-amber-900 dark:text-amber-200">
+              <ShieldAlert className="w-5 h-5 shrink-0 text-amber-600 dark:text-amber-400 mt-0.5" />
+              <div>
+                <span className="font-bold block">Account Temporarily Suspended</span>
+                <span>
+                  You received 5 distinct 1-star ratings. Squad creation is restricted until {suspensionExpiry ? new Date(suspensionExpiry).toLocaleDateString() : 'your suspension expires'}.
+                </span>
+              </div>
+            </div>
+          )}
+
           {error && (
             <div className="p-3.5 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl flex items-center gap-2 text-xs text-red-700 dark:text-red-300">
               <AlertCircle className="w-4 h-4 shrink-0 text-red-600 dark:text-red-400" />
@@ -353,7 +409,7 @@ export const CreateActivityScreen: React.FC<CreateActivityScreenProps> = ({
             </button>
             <button
               type="submit"
-              disabled={isSubmitting}
+              disabled={isSubmitting || isSuspended}
               className="py-3 px-7 bg-[#EAAA00] hover:bg-[#D69900] active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed text-[#240720] font-bold text-sm rounded-xl shadow-md transition-all flex items-center gap-2 cursor-pointer"
             >
               {isSubmitting ? (

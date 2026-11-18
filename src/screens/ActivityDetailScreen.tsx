@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Activity, ActivityMessage, UserProfile } from '../types';
+import { User } from 'firebase/auth';
+import { Activity, ActivityMessage, SuspensionStatusInfo, UserProfile } from '../types';
 import { activityFirestoreService } from '../services/activityService';
 import { matchRequestService } from '../services/matchRequestService';
 import { authService } from '../services/authService';
@@ -19,11 +20,17 @@ import {
   MessageCircle,
   XCircle,
   Sparkles,
+  Star,
 } from 'lucide-react';
+import { FeedbackModal } from '../components/FeedbackModal';
+import { UserProfileModal } from '../components/UserProfileModal';
+import { feedbackService } from '../services/feedbackService';
 
 interface ActivityDetailScreenProps {
   activityId: string;
   currentUser: UserProfile;
+  authUser?: User | null;
+  currentUserSuspension?: SuspensionStatusInfo;
   onBack: () => void;
   onActivityUpdated: () => void;
   activities?: Activity[];
@@ -32,12 +39,17 @@ interface ActivityDetailScreenProps {
 export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
   activityId,
   currentUser,
+  authUser = null,
+  currentUserSuspension,
   onBack,
   onActivityUpdated,
   activities,
 }) => {
   const [activity, setActivity] = useState<Activity | undefined>(() =>
     activities?.find((a) => a.id === activityId)
+  );
+  const [isLoadingActivity, setIsLoadingActivity] = useState<boolean>(() =>
+    !activities?.some((a) => a.id === activityId)
   );
   const [messages, setMessages] = useState<ActivityMessage[]>([]);
   const [isChatLoading, setIsChatLoading] = useState(false);
@@ -49,6 +61,8 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
   >({});
   const [newMsgText, setNewMsgText] = useState('');
   const [isReportOpen, setIsReportOpen] = useState(false);
+  const [isFeedbackModalOpen, setIsFeedbackModalOpen] = useState(false);
+  const [selectedProfileUserId, setSelectedProfileUserId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
   const [isActionLoading, setIsActionLoading] = useState(false);
@@ -58,21 +72,41 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
   // Sync state
   const refresh = () => {
     const updated = activities?.find((a) => a.id === activityId);
-    setActivity(updated);
+    if (updated) {
+      setActivity(updated);
+    }
     onActivityUpdated();
   };
 
   useEffect(() => {
+    let isCancelled = false;
     const found = activities?.find((a) => a.id === activityId);
     if (found) {
       setActivity(found);
-    } else {
-      activityFirestoreService.getActivityById(activityId).then((cloudAct) => {
-        if (cloudAct) {
+      setIsLoadingActivity(false);
+      return;
+    }
+
+    setIsLoadingActivity(true);
+    activityFirestoreService
+      .getActivityById(activityId)
+      .then((cloudAct) => {
+        if (!isCancelled && cloudAct) {
           setActivity(cloudAct);
         }
+      })
+      .catch((err) => {
+        console.warn('Could not load activity details:', err);
+      })
+      .finally(() => {
+        if (!isCancelled) {
+          setIsLoadingActivity(false);
+        }
       });
-    }
+
+    return () => {
+      isCancelled = true;
+    };
   }, [activityId, activities]);
 
   // Real-time Firestore chat subscription
@@ -107,22 +141,36 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
 
   useEffect(() => {
     if (!activity || !activity.participantIds?.length) return;
-    authService.getPublicProfiles(activity.participantIds).then((profiles) => {
-      setPublicProfiles(profiles);
-    });
-  }, [activity?.id, activity?.participantIds]);
+    authService
+      .getPublicProfiles(activity.participantIds)
+      .then((profiles) => {
+        setPublicProfiles(profiles);
+      })
+      .catch((err) => {
+        console.warn('Could not fetch participant profiles:', err);
+      });
+  }, [activity?.id, activity?.participantIds?.join(',')]);
 
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages.length]);
 
+  if (isLoadingActivity && !activity) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-16 text-center space-y-3">
+        <Loader2 className="w-7 h-7 animate-spin text-[#3A0F34] dark:text-[#EAAA00] mx-auto" />
+        <p className="text-xs text-slate-500 dark:text-slate-400">Loading activity details...</p>
+      </div>
+    );
+  }
+
   if (!activity) {
     return (
       <div className="max-w-2xl mx-auto px-4 py-12 text-center">
-        <h2 className="text-xl font-bold text-[#3A0F34]">Activity not found</h2>
+        <h2 className="text-xl font-bold text-[#3A0F34] dark:text-slate-100">Activity not found</h2>
         <button
           onClick={onBack}
-          className="mt-4 px-4 py-2 bg-[#3A0F34] text-white rounded-xl text-xs font-semibold"
+          className="mt-4 px-4 py-2 bg-[#3A0F34] dark:bg-[#EAAA00] text-white dark:text-[#240720] rounded-xl text-xs font-semibold cursor-pointer"
         >
           Back to Discover
         </button>
@@ -144,6 +192,17 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
     setIsActionLoading(true);
 
     try {
+      // Check authoritative userModeration suspension standing
+      const suspInfo = await feedbackService.getSuspensionStatusStrict(currentUser.id);
+      if (suspInfo.isSuspended || currentUserSuspension?.isSuspended) {
+        const exp = suspInfo.expiresAt || currentUserSuspension?.expiresAt;
+        throw new Error(
+          `Account suspended: You cannot join squads while under temporary suspension (expires ${
+            exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+          }).`
+        );
+      }
+
       await activityFirestoreService.joinActivity(activity.id, currentUser);
       setActionSuccess('You joined this squad! Real-time roster updated.');
       // Immediate optimistic update to reflect joined state without waiting on async onSnapshot
@@ -249,6 +308,40 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
           const parsed = JSON.parse(msg);
           if (parsed?.error) msg = parsed.error;
         } catch {}
+      }
+      setActionError(msg);
+    } finally {
+      setIsActionLoading(false);
+    }
+  };
+
+  const handleComplete = async () => {
+    if (isActionLoading || !activity) return;
+    if (!confirm('Mark this squad activity as completed? Participants will be invited to leave feedback.')) {
+      return;
+    }
+    setActionError(null);
+    setActionSuccess(null);
+    setIsActionLoading(true);
+
+    try {
+      await activityFirestoreService.completeActivity(activity.id, currentUser.id);
+      setActionSuccess('Activity marked as completed! Squad members can now submit ratings and feedback.');
+      setActivity((prev) => (prev ? { ...prev, status: 'completed' } : prev));
+      onActivityUpdated();
+    } catch (err: unknown) {
+      console.error('Failed to complete activity in Firestore:', err);
+      const errorObj = err as Error;
+      let msg = errorObj?.message || 'Failed to complete activity.';
+      if (msg.includes('Missing or insufficient permissions') || msg.includes('PERMISSION_DENIED')) {
+        msg = 'Unable to complete: Only the host can mark this activity as completed.';
+      } else {
+        try {
+          const parsed = JSON.parse(msg);
+          if (parsed?.error) msg = parsed.error;
+        } catch {
+          // Keep raw message
+        }
       }
       setActionError(msg);
     } finally {
@@ -499,12 +592,15 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
                 : pub?.avatarColor || '#52184A';
 
               return (
-                <div
+                <button
                   key={id}
-                  className="flex items-center gap-2 bg-slate-100/80 dark:bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700"
+                  type="button"
+                  onClick={() => setSelectedProfileUserId(id)}
+                  className="flex items-center gap-2 bg-slate-100/80 dark:bg-slate-800 hover:bg-slate-200/90 dark:hover:bg-slate-700 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer text-left"
+                  title="Click to view student reputation & feedback tags"
                 >
                   <div
-                    className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold"
+                    className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0"
                     style={{ backgroundColor: color }}
                   >
                     {initials}
@@ -513,7 +609,7 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
                   {isParticipantHost && (
                     <span className="text-[9px] text-[#EAAA00] font-bold" title="Squad Host">★</span>
                   )}
-                </div>
+                </button>
               );
             })}
 
@@ -536,14 +632,37 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
         <div className="pt-2">
           {activity.isOneToOne ? (
             activity.status === 'completed' || activity.status === 'cancelled' ? (
-              <div className="p-4 bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-2xl text-xs text-slate-700 dark:text-slate-300 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <Lock className="w-4 h-4 text-slate-500 dark:text-slate-400 shrink-0" />
-                  <div>
-                    <span className="font-bold block text-[#3A0F34] dark:text-slate-100">1-to-1 Match Ended</span>
-                    <span className="text-slate-500 dark:text-slate-400">Chat history is preserved in read-only mode for both students.</span>
+              <div className="space-y-3">
+                <div className="p-4 bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-2xl text-xs text-slate-700 dark:text-slate-300 flex items-center justify-between gap-3">
+                  <div className="flex items-center gap-2">
+                    <Lock className="w-4 h-4 text-slate-500 dark:text-slate-400 shrink-0" />
+                    <div>
+                      <span className="font-bold block text-[#3A0F34] dark:text-slate-100">1-to-1 Match Ended</span>
+                      <span className="text-slate-500 dark:text-slate-400">Chat history is preserved in read-only mode for both students.</span>
+                    </div>
                   </div>
                 </div>
+
+                {activity.status === 'completed' && isJoined && (
+                  <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/40 dark:to-orange-950/40 border border-amber-200 dark:border-amber-900/60 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div>
+                      <span className="text-xs font-bold text-[#3A0F34] dark:text-amber-200 block flex items-center gap-1.5">
+                        <Star className="w-3.5 h-3.5 fill-current text-[#EAAA00]" />
+                        Match Completed · Feedback Available
+                      </span>
+                      <span className="text-[11px] text-slate-600 dark:text-slate-300">
+                        Leave a confidential rating for your match partner to build campus trust.
+                      </span>
+                    </div>
+                    <button
+                      onClick={() => setIsFeedbackModalOpen(true)}
+                      className="py-2 px-4 bg-[#EAAA00] hover:bg-[#D69900] text-[#240720] font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                    >
+                      <Star className="w-3.5 h-3.5 fill-current" />
+                      <span>Leave Feedback</span>
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/40 dark:to-orange-950/40 border border-amber-200 dark:border-amber-900/60 rounded-2xl">
@@ -578,31 +697,73 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
               <span className="font-bold block">Activity Cancelled</span>
               <span>This activity was cancelled by the host. Coordination chat remains viewable for participants.</span>
             </div>
-          ) : isPast ? (
-            <div className="p-3 bg-slate-100 dark:bg-slate-800/80 text-slate-500 dark:text-slate-400 text-xs font-medium rounded-xl text-center">
-              This activity has completed.
+          ) : activity.status === 'completed' ? (
+            <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/40 dark:to-orange-950/40 border border-amber-200 dark:border-amber-900/60 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <span className="text-xs font-bold text-[#3A0F34] dark:text-amber-200 block flex items-center gap-1.5">
+                  <Star className="w-3.5 h-3.5 fill-current text-[#EAAA00]" />
+                  Squad Completed · Feedback Open
+                </span>
+                <span className="text-[11px] text-slate-600 dark:text-slate-300">
+                  Rate your squad members to acknowledge great sportsmanship and community vibes.
+                </span>
+              </div>
+              {isJoined && activity.participantIds.length > 1 && (
+                <button
+                  onClick={() => setIsFeedbackModalOpen(true)}
+                  className="py-2 px-4 bg-[#EAAA00] hover:bg-[#D69900] text-[#240720] font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                >
+                  <Star className="w-3.5 h-3.5 fill-current" />
+                  <span>Leave Feedback</span>
+                </button>
+              )}
             </div>
           ) : isHost ? (
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-[#FFF9EB] dark:bg-amber-950/30 border border-[#EAAA00]/40 dark:border-amber-900/60 rounded-2xl">
               <div>
-                <span className="text-xs font-bold text-[#3A0F34] dark:text-amber-200 block">You are the host</span>
+                <span className="text-xs font-bold text-[#3A0F34] dark:text-amber-200 block">
+                  {isPast ? 'Session time elapsed · Action required' : 'You are the host'}
+                </span>
                 <span className="text-[11px] text-slate-600 dark:text-slate-300">
-                  Manage your squad and coordinate with classmates in the chat below.
+                  {isPast
+                    ? 'Mark this squad as completed so participants can submit feedback and ratings.'
+                    : 'Manage your squad, coordinate in chat, and mark completed when finished.'}
                 </span>
               </div>
-              <button
-                onClick={handleCancel}
-                disabled={isActionLoading}
-                className="py-2 px-3.5 bg-white dark:bg-slate-900 hover:bg-amber-50 dark:hover:bg-amber-950/50 disabled:opacity-50 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-amber-900/60 text-xs font-semibold rounded-xl transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer"
-                title="Cancel activity (marks cancelled for all participants)"
-              >
-                {isActionLoading ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <XCircle className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400" />
-                )}
-                <span>Cancel Activity</span>
-              </button>
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  onClick={handleComplete}
+                  disabled={isActionLoading}
+                  className="py-2 px-3.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold rounded-xl transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer shadow-xs"
+                  title="Mark squad activity as completed"
+                >
+                  {isActionLoading ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <CheckCircle className="w-3.5 h-3.5" />
+                  )}
+                  <span>Mark Completed</span>
+                </button>
+                <button
+                  onClick={handleCancel}
+                  disabled={isActionLoading}
+                  className="py-2 px-3.5 bg-white dark:bg-slate-900 hover:bg-amber-50 dark:hover:bg-amber-950/50 disabled:opacity-50 text-amber-900 dark:text-amber-300 border border-amber-300 dark:border-amber-900/60 text-xs font-semibold rounded-xl transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer"
+                  title="Cancel activity (marks cancelled for all participants)"
+                >
+                  {isActionLoading ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <XCircle className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400" />
+                  )}
+                  <span>Cancel Activity</span>
+                </button>
+              </div>
+            </div>
+          ) : isPast ? (
+            <div className="p-3 bg-slate-100 dark:bg-slate-800/80 text-slate-500 dark:text-slate-400 text-xs font-medium rounded-xl text-center">
+              {isJoined
+                ? 'This activity has ended. Waiting for the host to mark it completed for feedback.'
+                : 'This activity has ended.'}
             </div>
           ) : isJoined ? (
             <div className="flex items-center justify-between gap-3 p-4 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900/60 rounded-2xl flex-wrap">
@@ -818,6 +979,51 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
           refresh();
         }}
       />
+
+      {/* Feedback Modal for Completed Squad */}
+      {activity && (
+        <FeedbackModal
+          isOpen={isFeedbackModalOpen}
+          onClose={() => setIsFeedbackModalOpen(false)}
+          activity={activity}
+          currentUser={currentUser}
+          publicProfiles={publicProfiles}
+          onFeedbackSubmitted={() => {
+            refresh();
+          }}
+        />
+      )}
+
+      {/* Student Public Profile Modal */}
+      {selectedProfileUserId && (
+        <UserProfileModal
+          isOpen={!!selectedProfileUserId}
+          onClose={() => setSelectedProfileUserId(null)}
+          userId={selectedProfileUserId}
+          displayName={
+            selectedProfileUserId === activity.hostId || selectedProfileUserId === activity.createdBy
+              ? activity.hostName
+              : selectedProfileUserId === currentUser.id
+              ? currentUser.name
+              : publicProfiles[selectedProfileUserId]?.displayName || 'Campus Student'
+          }
+          avatarColor={
+            selectedProfileUserId === activity.hostId || selectedProfileUserId === activity.createdBy
+              ? activity.hostAvatarColor
+              : selectedProfileUserId === currentUser.id
+              ? currentUser.avatarColor
+              : publicProfiles[selectedProfileUserId]?.avatarColor || '#3A0F34'
+          }
+          avatarInitials={
+            selectedProfileUserId === activity.hostId || selectedProfileUserId === activity.createdBy
+              ? activity.hostAvatarInitials
+              : selectedProfileUserId === currentUser.id
+              ? currentUser.avatarInitials
+              : publicProfiles[selectedProfileUserId]?.avatarInitials || 'ST'
+          }
+          collegeOrCampus={activity.campus}
+        />
+      )}
     </div>
   );
 };

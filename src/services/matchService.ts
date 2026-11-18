@@ -9,14 +9,13 @@ export class MatchService {
     activities: Activity[],
     options: {
       strictCampus?: boolean;
-      onlyImmediate?: boolean; // For "Rescue Me From Boredom"
     } = {}
   ): MatchRecommendation[] {
     const now = Date.now();
 
     const candidates = activities.filter((act) => {
-      // Must not be cancelled
-      if (act.status === 'cancelled' || act.reported) return false;
+      // Must not be cancelled, completed, ended, or reported
+      if (act.status === 'cancelled' || act.status === 'completed' || act.endedAt || act.reported) return false;
 
       // Must not be full
       if (act.participantIds.length >= act.maxParticipants || act.status === 'full') {
@@ -32,14 +31,6 @@ export class MatchService {
       const actTime = new Date(act.dateTime).getTime();
       if (actTime + act.durationMinutes * 60000 < now) {
         return false;
-      }
-
-      // If onlyImmediate (e.g. for "Rescue Me From Boredom"), within next 12 hours
-      if (options.onlyImmediate) {
-        const hoursAhead = (actTime - now) / (1000 * 60 * 60);
-        if (hoursAhead > 12) {
-          return false;
-        }
       }
 
       return true;
