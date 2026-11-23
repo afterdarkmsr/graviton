@@ -226,6 +226,15 @@ export class CollegeVerificationService {
   public getPendingEmail(): string | null {
     return localStorage.getItem(STORAGE_EMAIL_KEY);
   }
+
+  /**
+   * Clears verification query parameters from the URL when the user cancels or resets.
+   */
+  public clearIncomingVerificationUrl(): void {
+    if (window.location.search || window.location.hash) {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }
 }
 
 export const collegeVerificationService = new CollegeVerificationService();

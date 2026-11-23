@@ -5,6 +5,7 @@ import {
 } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { db, auth, functions } from '../lib/firebase';
+import { FEATURES } from '../config/features';
 import {
   Activity,
   ActivityFeedback,
@@ -45,6 +46,12 @@ export class FeedbackService {
    * are executed strictly on the server via Firebase Admin SDK.
    */
   public async submitFeedback(input: SubmitFeedbackInput): Promise<ActivityFeedback> {
+    if (!FEATURES.FEEDBACK_AND_APPEALS) {
+      throw new Error(
+        'Peer feedback and ratings are unavailable in this launch mode.'
+      );
+    }
+
     const currentUid = auth.currentUser?.uid;
     if (!currentUid) {
       throw new Error('Authentication required: You must be signed in to submit feedback.');
@@ -129,6 +136,10 @@ export class FeedbackService {
     activityId: string,
     raterId: string
   ): Promise<Record<string, ActivityFeedback>> {
+    if (!FEATURES.FEEDBACK_AND_APPEALS) {
+      return {};
+    }
+
     try {
       const getFeedbackFn = httpsCallable<{ activityId: string }, Record<string, ActivityFeedback>>(
         functions,
@@ -336,6 +347,12 @@ export class FeedbackService {
    * Submits an appeal for an active suspension via trusted Cloud Function.
    */
   public async submitSuspensionAppeal(userId: string, appealReason: string): Promise<void> {
+    if (!FEATURES.FEEDBACK_AND_APPEALS) {
+      throw new Error(
+        'Suspension appeals are unavailable in this launch mode.'
+      );
+    }
+
     const currentUid = auth.currentUser?.uid;
     if (!currentUid || currentUid !== userId) {
       throw new Error('You can only submit an appeal for your own account.');
@@ -385,6 +402,12 @@ export class FeedbackService {
     decision: 'accepted' | 'rejected',
     moderationNote?: string
   ): Promise<void> {
+    if (!FEATURES.FEEDBACK_AND_APPEALS) {
+      throw new Error(
+        'Suspension appeal review is unavailable in this launch mode.'
+      );
+    }
+
     const reviewFn = httpsCallable<
       { targetUserId: string; decision: 'accepted' | 'rejected'; moderationNote?: string },
       { success: boolean; decision: string }
@@ -398,6 +421,10 @@ export class FeedbackService {
    * Requires request.auth.token.admin === true.
    */
   public async listPendingSuspensionAppeals(): Promise<PendingSuspensionAppeal[]> {
+    if (!FEATURES.FEEDBACK_AND_APPEALS) {
+      return [];
+    }
+
     const listFn = httpsCallable<
       void,
       { success: boolean; appeals: PendingSuspensionAppeal[] }

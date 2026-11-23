@@ -24,7 +24,8 @@ import {
 } from 'lucide-react';
 import { feedbackService } from '../services/feedbackService';
 import { SuspensionAppealModal } from '../components/SuspensionAppealModal';
-import { FEEDBACK_TAGS, FeedbackTag, UserReputation } from '../types';
+import { FEEDBACK_TAGS, UserReputation } from '../types';
+import { FEATURES } from '../config/features';
 
 interface ProfileScreenProps {
   profile: UserProfile;
@@ -120,7 +121,10 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
   const [isAppealModalOpen, setIsAppealModalOpen] = useState(false);
 
   useEffect(() => {
-    if (!profile.id) return;
+    if (!profile.id || !FEATURES.FEEDBACK_AND_APPEALS) {
+      setReputation(null);
+      return;
+    }
     const unsub = feedbackService.subscribeUserReputation(profile.id, (rep) => {
       setReputation(rep);
     });
@@ -176,7 +180,10 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     setIsSkipped(false);
   };
 
-  const handleRefreshVerification = async () => {
+  const [manualLinkEmail, setManualLinkEmail] = useState('');
+  const [needsEmailConfirm, setNeedsEmailConfirm] = useState(false);
+
+  const handleRefreshVerification = async (overrideEmail?: string) => {
     setIsCheckingLink(true);
     setVerificationError(null);
     try {
@@ -185,10 +192,18 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         onRefreshAuthState?.();
         // If there is an active verification link in URL, complete it
         if (collegeVerificationService.isIncomingVerificationLink()) {
-          const result = await collegeVerificationService.completeVerification();
+          const result = await collegeVerificationService.completeVerification(overrideEmail);
           if (result.success) {
             setLinkSentEmail(null);
+            setNeedsEmailConfirm(false);
+            setManualLinkEmail('');
+            await authUser.reload();
             onRefreshAuthState?.();
+          } else if (result.code === 'EMAIL_REQUIRED') {
+            setNeedsEmailConfirm(true);
+            setVerificationError(
+              'Because this link was opened in a different browser or cleared session, re-enter the exact @cgcjhanjeri.in email address you used to request it.'
+            );
           } else if (result.error) {
             setVerificationError(result.error);
           }
@@ -357,7 +372,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 {verificationState.isVerified ? (
                   <span className="text-[11px] bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800/70 px-2.5 py-0.5 rounded-full font-bold flex items-center gap-1 shadow-xs">
                     <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                    <span>VERIFIED CGC STUDENT</span>
+                    <span>LINKED @CGCJHANJERI.IN</span>
                   </span>
                 ) : (
                   <span className="text-[11px] bg-[#EAAA00]/20 text-[#240720] dark:text-[#EAAA00] px-2 py-0.5 rounded-md font-bold">
@@ -444,7 +459,9 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                   Campus Administrator Console
                 </h3>
                 <p className="text-xs text-slate-600 dark:text-slate-400">
-                  Verified moderation privileges active. Review student appeals for peer-triggered suspensions.
+                  {FEATURES.FEEDBACK_AND_APPEALS
+                    ? 'Verified moderation privileges active. Review student appeals and community safety reports.'
+                    : 'Administrator privileges active. Review community safety reports submitted across campus activities.'}
                 </p>
               </div>
             </div>
@@ -456,7 +473,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 className="py-2 px-4 bg-[#3A0F34] hover:bg-[#52184A] text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer flex items-center gap-2"
               >
                 <ShieldAlert className="w-3.5 h-3.5 text-[#EAAA00]" />
-                <span>Review Appeals Queue</span>
+                <span>{FEATURES.FEEDBACK_AND_APPEALS ? 'Open Moderation Queue' : 'Open Safety Reports'}</span>
               </button>
             )}
           </div>
@@ -464,7 +481,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
       )}
 
       {/* Suspension Alert Notice if User is Temporarily Suspended */}
-      {suspInfo.isSuspended && (
+      {FEATURES.FEEDBACK_AND_APPEALS && suspInfo.isSuspended && (
         <div className="p-5 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900/60 rounded-3xl space-y-3 animate-in fade-in">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div className="flex items-center gap-2.5">
@@ -476,7 +493,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                   Account Temporarily Suspended ({suspInfo.remainingDays} days remaining)
                 </h3>
                 <p className="text-xs text-red-700 dark:text-red-300">
-                  {suspInfo.reason || 'Received 5 distinct 1-star ratings across campus activities.'}
+                  {suspInfo.reason || 'Temporary moderation restriction active.'}
                 </p>
               </div>
             </div>
@@ -502,6 +519,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
       )}
 
       {/* Campus Reputation & Feedback Section */}
+      {FEATURES.FEEDBACK_AND_APPEALS && (
       <section className="bg-white dark:bg-slate-900 rounded-3xl p-6 sm:p-8 shadow-sm border border-slate-200/90 dark:border-slate-800 space-y-6">
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div>
@@ -629,6 +647,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           </span>
         </div>
       </section>
+      )}
 
       {/* Editing Form */}
       {isEditing ? (
@@ -833,9 +852,9 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <h2 className="text-sm font-bold text-emerald-950 dark:text-emerald-200">Verified CGC Student</h2>
+                      <h2 className="text-sm font-bold text-emerald-950 dark:text-emerald-200">Linked @cgcjhanjeri.in Email</h2>
                       <span className="text-[10px] font-bold bg-emerald-200/70 dark:bg-emerald-900/70 text-emerald-900 dark:text-emerald-200 px-2 py-0.5 rounded-full">
-                        AUTHENTICATED
+                        EMAIL LINKED
                       </span>
                     </div>
                     <p className="text-xs text-emerald-700 dark:text-emerald-300 mt-0.5 flex items-center gap-1.5 font-medium">
@@ -846,11 +865,11 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 </div>
 
                 <div className="text-[11px] text-emerald-800 dark:text-emerald-300 bg-emerald-100/70 dark:bg-emerald-950/60 px-3 py-1.5 rounded-xl border border-emerald-200/50 dark:border-emerald-900/60 self-start sm:self-auto font-medium">
-                  Google UID Preserved · Ownership Confirmed
+                  Google UID Preserved · Optional Self-Link
                 </div>
               </div>
               <p className="text-xs text-emerald-800/80 dark:text-emerald-300/90 leading-relaxed pt-2 border-t border-emerald-200/60 dark:border-emerald-900/50">
-                Your campus email ownership has been verified directly via Firebase Auth. Your primary Google login and all VibeMatch activities remain intact.
+                Your @cgcjhanjeri.in email address is linked to this Firebase account while keeping your Google login and VibeMatch activities intact. Note: this optional step does not confirm official enrollment or enforce CGC-only access.
               </p>
             </section>
           ) : isSkipped ? (
@@ -861,13 +880,13 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 </div>
                 <div>
                   <div className="flex items-center gap-2">
-                    <span className="text-xs font-bold text-[#3A0F34] dark:text-slate-100">CGC College Verification</span>
+                    <span className="text-xs font-bold text-[#3A0F34] dark:text-slate-100">Campus Email Link</span>
                     <span className="text-[10px] bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 font-semibold px-2 py-0.5 rounded-full">
                       Optional
                     </span>
                   </div>
                   <span className="text-[11px] text-slate-500 dark:text-slate-400">
-                    Skipped for now — all VibeMatch features remain fully accessible.
+                    Skipped for now — all VibeMatch features remain accessible.
                   </span>
                 </div>
               </div>
@@ -876,7 +895,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                 onClick={handleExpandVerification}
                 className="py-1.5 px-3 rounded-xl text-xs font-bold text-[#3A0F34] dark:text-slate-100 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 transition-colors shrink-0"
               >
-                Verify Now
+                Link Email
               </button>
             </section>
           ) : (
@@ -888,13 +907,13 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                   </div>
                   <div>
                     <div className="flex items-center gap-2">
-                      <h2 className="text-sm font-bold text-[#3A0F34] dark:text-slate-100">Verify CGC College Email</h2>
+                      <h2 className="text-sm font-bold text-[#3A0F34] dark:text-slate-100">Link Campus Email (@cgcjhanjeri.in)</h2>
                       <span className="text-[10px] font-bold bg-[#EAAA00]/20 text-[#240720] dark:text-[#EAAA00] px-2 py-0.5 rounded-full">
                         Optional
                       </span>
                     </div>
                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                      Confirm official enrollment with your @cgcjhanjeri.in address.
+                      Optionally link your @cgcjhanjeri.in email address. Any Google account can currently access VibeMatch.
                     </p>
                   </div>
                 </div>
@@ -913,19 +932,39 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
                   <div className="flex items-start gap-2.5">
                     <Mail className="w-4 h-4 text-amber-700 dark:text-amber-400 shrink-0 mt-0.5" />
                     <div className="space-y-1 text-xs text-amber-950 dark:text-amber-200">
-                      <span className="font-bold block">Verification Link Dispatched</span>
+                      <span className="font-bold block">Email Link Dispatched</span>
                       <p className="leading-relaxed">
-                        We sent a genuine Firebase sign-in verification link to{' '}
+                        We sent a Firebase sign-in link to{' '}
                         <strong className="font-semibold text-amber-950 dark:text-amber-100">{linkSentEmail}</strong>.
-                        Open the email in your college inbox and click the link to confirm ownership.
+                        Open the email and click the link to attach it to your account. If opened in another browser, you&apos;ll be asked to confirm this email address.
                       </p>
                     </div>
                   </div>
 
+                  {needsEmailConfirm && (
+                    <div className="flex flex-col sm:flex-row gap-2 pt-2 border-t border-amber-200/60 dark:border-amber-900/50">
+                      <input
+                        type="email"
+                        value={manualLinkEmail}
+                        onChange={(e) => setManualLinkEmail(e.target.value)}
+                        placeholder="Re-enter your @cgcjhanjeri.in email"
+                        className="flex-1 text-xs px-3 py-2 rounded-xl bg-white dark:bg-slate-800 border border-amber-300 dark:border-amber-800 text-slate-900 dark:text-slate-100"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handleRefreshVerification(manualLinkEmail)}
+                        disabled={isCheckingLink || !collegeVerificationService.validateCgcEmail(manualLinkEmail)}
+                        className="py-2 px-3.5 rounded-xl text-xs font-bold bg-[#3A0F34] text-white disabled:opacity-50"
+                      >
+                        Confirm & Link
+                      </button>
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-amber-200/60 dark:border-amber-900/50">
                     <button
                       type="button"
-                      onClick={handleRefreshVerification}
+                      onClick={() => handleRefreshVerification()}
                       disabled={isCheckingLink}
                       className="py-1.5 px-3.5 rounded-xl text-xs font-bold bg-amber-700 hover:bg-amber-800 text-white flex items-center gap-1.5 transition-colors disabled:opacity-50"
                     >
@@ -1136,7 +1175,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               <div className="space-y-1 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
                 <span className="font-bold text-[#3A0F34] dark:text-slate-100 block">Safety & Integrity Transparency</span>
                 <p>
-                  VibeMatch uses named public campus venues. CGC college-email verification is planned as a future requirement; ordinary Google Sign-In currently enables testing and community access without proving official CGC enrollment. User profiles are secured in Firestore with strict user-level authorization rules.
+                  VibeMatch uses named public campus venues. Any Google account can currently sign in; linking a @cgcjhanjeri.in email is optional and does not enforce CGC-only access or verify official enrollment until server-side domain enforcement is implemented. User profiles are secured in Firestore with user-level authorization rules.
                 </p>
               </div>
             </div>
@@ -1145,14 +1184,16 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
       )}
 
       {/* Suspension Appeal Modal */}
-      <SuspensionAppealModal
-        isOpen={isAppealModalOpen}
-        onClose={() => setIsAppealModalOpen(false)}
-        userId={profile.id}
-        onAppealSubmitted={() => {
-          setIsAppealModalOpen(false);
-        }}
-      />
+      {FEATURES.FEEDBACK_AND_APPEALS && (
+        <SuspensionAppealModal
+          isOpen={isAppealModalOpen}
+          onClose={() => setIsAppealModalOpen(false)}
+          userId={profile.id}
+          onAppealSubmitted={() => {
+            setIsAppealModalOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 };

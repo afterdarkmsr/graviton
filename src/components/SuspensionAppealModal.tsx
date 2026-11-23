@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { feedbackService } from '../services/feedbackService';
+import { FEATURES } from '../config/features';
 import { X, ShieldAlert, Send, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
 
 interface SuspensionAppealModalProps {
@@ -20,7 +21,7 @@ export const SuspensionAppealModal: React.FC<SuspensionAppealModalProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState(false);
 
-  if (!isOpen) return null;
+  if (!isOpen || !FEATURES.FEEDBACK_AND_APPEALS) return null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

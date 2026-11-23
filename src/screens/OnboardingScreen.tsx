@@ -162,7 +162,7 @@ export const OnboardingScreen: React.FC<OnboardingScreenProps> = ({
               <div>
                 <h3 className="text-lg font-bold text-[#3A0F34] dark:text-white">Tell us about yourself</h3>
                 <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Your student identity helps match you with verified university peers.
+                  Your student profile helps match you with campus peers.
                 </p>
               </div>
 

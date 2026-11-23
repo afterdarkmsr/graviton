@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
-import { ShieldAlert, AlertTriangle, ArrowRight } from 'lucide-react';
+import { ShieldAlert, ArrowRight } from 'lucide-react';
 import { SuspensionAppealModal } from './SuspensionAppealModal';
+import { FEATURES } from '../config/features';
 
 interface SuspensionNoticeBannerProps {
   userId: string;
@@ -13,13 +14,14 @@ interface SuspensionNoticeBannerProps {
 
 export const SuspensionNoticeBanner: React.FC<SuspensionNoticeBannerProps> = ({
   userId,
-  reason,
   expiresAt,
   remainingDays = 15,
   appealStatus = 'none',
   onAppealSubmitted,
 }) => {
   const [isAppealOpen, setIsAppealOpen] = useState(false);
+
+  if (!FEATURES.FEEDBACK_AND_APPEALS) return null;
 
   const formattedExpiry = expiresAt
     ? new Date(expiresAt).toLocaleDateString([], {
@@ -65,15 +67,17 @@ export const SuspensionNoticeBanner: React.FC<SuspensionNoticeBannerProps> = ({
         </div>
       </div>
 
-      <SuspensionAppealModal
-        isOpen={isAppealOpen}
-        onClose={() => setIsAppealOpen(false)}
-        userId={userId}
-        onAppealSubmitted={() => {
-          setIsAppealOpen(false);
-          if (onAppealSubmitted) onAppealSubmitted();
-        }}
-      />
+      {FEATURES.FEEDBACK_AND_APPEALS && (
+        <SuspensionAppealModal
+          isOpen={isAppealOpen}
+          onClose={() => setIsAppealOpen(false)}
+          userId={userId}
+          onAppealSubmitted={() => {
+            setIsAppealOpen(false);
+            if (onAppealSubmitted) onAppealSubmitted();
+          }}
+        />
+      )}
     </>
   );
 };

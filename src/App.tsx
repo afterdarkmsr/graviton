@@ -26,8 +26,9 @@ import { ProfileScreen } from './screens/ProfileScreen';
 import { AdminAppealsScreen } from './screens/AdminAppealsScreen';
 import { SuspensionNoticeBanner } from './components/SuspensionNoticeBanner';
 import { feedbackService } from './services/feedbackService';
-import { UserModeration, UserReputation } from './types';
-import { CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { FEATURES } from './config/features';
+import { SuspensionStatusInfo, UserModeration, UserReputation } from './types';
+import { CheckCircle2, AlertCircle, Loader2, Mail, X } from 'lucide-react';
 
 export default function App() {
   const [authUser, setAuthUser] = useState<User | null>(null);
@@ -59,6 +60,19 @@ export default function App() {
     suggestedNote?: string;
     venueHint?: string;
   } | null>(null);
+
+  // Cross-browser email link verification confirmation modal state
+  const [emailLinkModal, setEmailLinkModal] = useState<{
+    open: boolean;
+    email: string;
+    error: string | null;
+    isSubmitting: boolean;
+  }>({
+    open: false,
+    email: '',
+    error: null,
+    isSubmitting: false,
+  });
 
   // Global Toast Notification (timeout race guarded via ref)
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'info' | 'error' } | null>(
@@ -277,20 +291,17 @@ export default function App() {
     }
   }, [authUser?.uid, activitiesLoaded, activities, outgoingMatchRequests]);
 
-  // Real-time Reputation & Suspension Listener for Current User
+  // Real-time Reputation & Suspension Listener for Current User (V2 only)
   useEffect(() => {
-    if (!authUser?.uid) {
+    if (!authUser?.uid || !FEATURES.FEEDBACK_AND_APPEALS) {
       setCurrentUserReputation(null);
       setCurrentUserModeration(null);
       return;
     }
 
-    const unsubRep = feedbackService.subscribeUserReputation(
-      authUser.uid,
-      (rep) => {
-        setCurrentUserReputation(rep);
-      }
-    );
+    const unsubRep = feedbackService.subscribeUserReputation(authUser.uid, (rep) => {
+      setCurrentUserReputation(rep);
+    });
 
     const unsubMod = feedbackService.subscribeUserModeration(
       authUser.uid,
@@ -308,7 +319,9 @@ export default function App() {
     };
   }, [authUser?.uid]);
 
-  const currentUserSuspension = feedbackService.isSuspended(currentUserModeration || currentUserReputation);
+  const currentUserSuspension: SuspensionStatusInfo = FEATURES.FEEDBACK_AND_APPEALS
+    ? feedbackService.isSuspended(currentUserModeration || currentUserReputation)
+    : { isSuspended: false };
 
   // Check custom claim admin on auth token
   useEffect(() => {
@@ -334,13 +347,13 @@ export default function App() {
     if (!collegeVerificationService.isIncomingVerificationLink()) return;
 
     if (!authUser) {
-      showToast('Please sign in with your primary Google account first to complete college verification.', 'info');
+      showToast('Please sign in with your primary Google account first to complete campus email linking.', 'info');
       return;
     }
 
     collegeVerificationService.completeVerification().then(async (result) => {
       if (result.success) {
-        showToast(`CGC college email verified: ${result.linkedEmail}`, 'success');
+        showToast(`Campus email linked to your account: ${result.linkedEmail}`, 'success');
         try {
           await authUser.reload();
           setAuthUser(auth.currentUser);
@@ -349,13 +362,61 @@ export default function App() {
           console.warn('Auth reload warning:', e);
         }
         setActiveTab('profile');
+      } else if (result.code === 'EMAIL_REQUIRED') {
+        setEmailLinkModal({
+          open: true,
+          email: '',
+          error: null,
+          isSubmitting: false,
+        });
       } else if (result.code === 'NEED_LOGIN') {
         showToast(result.error || 'Please sign in first.', 'info');
       } else if (result.error) {
+        if (result.code === 'EXPIRED' || result.code === 'COLLISION') {
+          collegeVerificationService.clearIncomingVerificationUrl();
+        }
         showToast(result.error, 'error');
       }
     });
   }, [authUser]);
+
+  const handleConfirmCrossBrowserEmail = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!authUser || emailLinkModal.isSubmitting) return;
+
+    const clean = emailLinkModal.email.trim().toLowerCase();
+    if (!collegeVerificationService.validateCgcEmail(clean)) {
+      setEmailLinkModal((prev) => ({
+        ...prev,
+        error: 'Please enter the exact @cgcjhanjeri.in email address you used to request this link.',
+      }));
+      return;
+    }
+
+    setEmailLinkModal((prev) => ({ ...prev, isSubmitting: true, error: null }));
+    const result = await collegeVerificationService.completeVerification(clean);
+    if (result.success) {
+      setEmailLinkModal({ open: false, email: '', error: null, isSubmitting: false });
+      showToast(`Campus email linked to your account: ${result.linkedEmail}`, 'success');
+      try {
+        await authUser.reload();
+        setAuthUser(auth.currentUser);
+        setAuthRefreshTick((t) => t + 1);
+      } catch (err) {
+        console.warn('Auth reload warning:', err);
+      }
+      setActiveTab('profile');
+    } else {
+      if (result.code === 'EXPIRED' || result.code === 'COLLISION') {
+        collegeVerificationService.clearIncomingVerificationUrl();
+      }
+      setEmailLinkModal((prev) => ({
+        ...prev,
+        isSubmitting: false,
+        error: result.error || 'Unable to verify email link.',
+      }));
+    }
+  };
 
   // Firebase Auth State Listener
   useEffect(() => {
@@ -504,16 +565,18 @@ export default function App() {
     if (!act) return;
 
     try {
-      const strictSusp = await feedbackService.getSuspensionStatusStrict(profile.id);
-      if (strictSusp.isSuspended || currentUserSuspension.isSuspended) {
-        const exp = strictSusp.expiresAt || currentUserSuspension.expiresAt;
-        showToast(
-          `Account suspended: You cannot join squads while under temporary suspension (expires ${
-            exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
-          }).`,
-          'error'
-        );
-        return;
+      if (FEATURES.FEEDBACK_AND_APPEALS) {
+        const strictSusp = await feedbackService.getSuspensionStatusStrict(profile.id);
+        if (strictSusp.isSuspended || currentUserSuspension.isSuspended) {
+          const exp = strictSusp.expiresAt || currentUserSuspension.expiresAt;
+          showToast(
+            `Account suspended: You cannot join squads while under temporary suspension (expires ${
+              exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+            }).`,
+            'error'
+          );
+          return;
+        }
       }
 
       showToast('Securing your spot...', 'info');
@@ -556,14 +619,16 @@ export default function App() {
       throw new Error(msg);
     }
 
-    const strictSusp = await feedbackService.getSuspensionStatusStrict(authUser.uid);
-    if (strictSusp.isSuspended || currentUserSuspension.isSuspended) {
-      const exp = strictSusp.expiresAt || currentUserSuspension.expiresAt;
-      const msg = `Account suspended: You cannot create squads while under temporary suspension (expires ${
-        exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
-      }).`;
-      showToast(msg, 'error');
-      throw new Error(msg);
+    if (FEATURES.FEEDBACK_AND_APPEALS) {
+      const strictSusp = await feedbackService.getSuspensionStatusStrict(authUser.uid);
+      if (strictSusp.isSuspended || currentUserSuspension.isSuspended) {
+        const exp = strictSusp.expiresAt || currentUserSuspension.expiresAt;
+        const msg = `Account suspended: You cannot create squads while under temporary suspension (expires ${
+          exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+        }).`;
+        showToast(msg, 'error');
+        throw new Error(msg);
+      }
     }
 
     const created = await activityFirestoreService.createActivity(data, profile);
@@ -597,6 +662,7 @@ export default function App() {
     return (
       <WelcomeScreen
         onGoogleSignInSuccess={handleGoogleSignInSuccess}
+        hasPendingVerificationLink={collegeVerificationService.isIncomingVerificationLink()}
       />
     );
   }
@@ -668,8 +734,8 @@ export default function App() {
         isAdmin={isAdmin}
       />
 
-      {/* Global Suspension Banner */}
-      {currentUserSuspension.isSuspended && authUser && (
+      {/* Global Suspension Banner (V2 only) */}
+      {FEATURES.FEEDBACK_AND_APPEALS && currentUserSuspension.isSuspended && authUser && (
         <SuspensionNoticeBanner
           userId={authUser.uid}
           reason={currentUserSuspension.reason}
@@ -805,6 +871,101 @@ export default function App() {
           />
         )}
       </main>
+
+      {/* Cross-Browser Campus Email Link Confirmation Modal */}
+      {emailLinkModal.open && authUser && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div
+            className="bg-white dark:bg-slate-900 rounded-3xl max-w-md w-full border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-5 border-b border-slate-100 dark:border-slate-800 flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-[#3A0F34] text-[#EAAA00] flex items-center justify-center">
+                  <Mail className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-[#3A0F34] dark:text-slate-100">
+                    Confirm Campus Email to Link
+                  </h3>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    Cross-browser email verification check
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  collegeVerificationService.clearIncomingVerificationUrl();
+                  setEmailLinkModal({ open: false, email: '', error: null, isSubmitting: false });
+                }}
+                className="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500 cursor-pointer"
+                aria-label="Cancel email linking"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmCrossBrowserEmail} className="p-5 space-y-4">
+              <div className="p-3 bg-slate-50 dark:bg-slate-800/70 rounded-2xl border border-slate-200 dark:border-slate-700 text-xs text-slate-600 dark:text-slate-300 space-y-1 leading-relaxed">
+                <p>
+                  Signed in as <strong className="text-[#3A0F34] dark:text-slate-100">{authUser.email || authUser.uid}</strong>.
+                </p>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                  Because this link was opened in a different browser or cleared session, re-enter the exact <strong className="text-slate-700 dark:text-slate-200">@cgcjhanjeri.in</strong> email address you used to request it. Your existing account UID will be preserved.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#3A0F34] dark:text-slate-200 uppercase tracking-wider mb-1.5">
+                  Campus Email Address
+                </label>
+                <input
+                  type="email"
+                  required
+                  value={emailLinkModal.email}
+                  onChange={(e) =>
+                    setEmailLinkModal((prev) => ({ ...prev, email: e.target.value, error: null }))
+                  }
+                  placeholder="e.g. rollno.student@cgcjhanjeri.in"
+                  className="w-full px-3.5 py-2.5 text-xs rounded-xl bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100"
+                />
+              </div>
+
+              {emailLinkModal.error && (
+                <div className="p-3 bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900/60 rounded-xl flex items-start gap-2 text-xs text-red-700 dark:text-red-300">
+                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                  <span>{emailLinkModal.error}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    collegeVerificationService.clearIncomingVerificationUrl();
+                    setEmailLinkModal({ open: false, email: '', error: null, isSubmitting: false });
+                  }}
+                  className="py-2 px-4 rounded-xl text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={
+                    emailLinkModal.isSubmitting ||
+                    !collegeVerificationService.validateCgcEmail(emailLinkModal.email)
+                  }
+                  className="py-2 px-4 rounded-xl text-xs font-bold bg-[#EAAA00] hover:bg-[#D69900] text-[#240720] disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+                >
+                  {emailLinkModal.isSubmitting && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>Complete Email Link</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

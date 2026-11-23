@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { feedbackService } from '../services/feedbackService';
 import { reportService } from '../services/reportService';
+import { FEATURES } from '../config/features';
 import { ActivityReport, PendingSuspensionAppeal } from '../types';
 
 interface AdminAppealsScreenProps {
@@ -33,10 +34,12 @@ export const AdminAppealsScreen: React.FC<AdminAppealsScreenProps> = ({
   onBack,
   onToast,
 }) => {
-  const [adminTab, setAdminTab] = useState<'appeals' | 'reports'>('appeals');
+  const [adminTab, setAdminTab] = useState<'appeals' | 'reports'>(
+    FEATURES.FEEDBACK_AND_APPEALS ? 'appeals' : 'reports'
+  );
 
   const [appeals, setAppeals] = useState<PendingSuspensionAppeal[]>([]);
-  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [isLoading, setIsLoading] = useState<boolean>(FEATURES.FEEDBACK_AND_APPEALS);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,6 +57,13 @@ export const AdminAppealsScreen: React.FC<AdminAppealsScreenProps> = ({
   const [submittingUserId, setSubmittingUserId] = useState<string | null>(null);
 
   const fetchAppeals = useCallback(async (isRefresh = false) => {
+    if (!FEATURES.FEEDBACK_AND_APPEALS) {
+      setAppeals([]);
+      setIsLoading(false);
+      setIsRefreshing(false);
+      return;
+    }
+
     if (isRefresh) {
       setIsRefreshing(true);
     } else {
@@ -124,7 +134,11 @@ export const AdminAppealsScreen: React.FC<AdminAppealsScreenProps> = ({
 
   useEffect(() => {
     if (isAdmin) {
-      fetchAppeals();
+      if (FEATURES.FEEDBACK_AND_APPEALS) {
+        fetchAppeals();
+      } else {
+        setIsLoading(false);
+      }
       fetchReports();
     } else {
       setIsLoading(false);
@@ -247,53 +261,80 @@ export const AdminAppealsScreen: React.FC<AdminAppealsScreenProps> = ({
               <span>Campus Governance & Moderation</span>
             </div>
             <h1 className="text-2xl font-black font-display text-[#3A0F34] dark:text-slate-100">
-              Suspension Appeals Review
+              {FEATURES.FEEDBACK_AND_APPEALS
+                ? 'Moderation & Appeals Review'
+                : 'Safety Reports Moderation'}
             </h1>
           </div>
         </div>
 
         <div className="flex items-center gap-2">
           <button
-            onClick={() => (adminTab === 'appeals' ? fetchAppeals(true) : fetchReports(true))}
+            onClick={() => (adminTab === 'appeals' && FEATURES.FEEDBACK_AND_APPEALS ? fetchAppeals(true) : fetchReports(true))}
             disabled={isRefreshing || isLoading || reportsLoading}
             className="px-3.5 py-2 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 text-xs font-bold hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors flex items-center gap-2 cursor-pointer disabled:opacity-50"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-[#EAAA00]' : ''}`} />
-            <span>Refresh Queue</span>
+            <span>{FEATURES.FEEDBACK_AND_APPEALS ? 'Refresh Queue' : 'Refresh Reports'}</span>
           </button>
         </div>
       </div>
 
-      {/* Admin Moderation Queue Tabs */}
-      <div className="flex items-center p-1 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-xs">
-        <button
-          type="button"
-          onClick={() => setAdminTab('appeals')}
-          className={`flex-1 py-2.5 px-3 text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer ${
-            adminTab === 'appeals'
-              ? 'bg-[#3A0F34] dark:bg-[#EAAA00] text-white dark:text-[#240720] shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:text-[#3A0F34] dark:hover:text-slate-200'
-          }`}
-        >
-          <ShieldAlert className="w-4 h-4" />
-          <span>Suspension Appeals ({appeals.length})</span>
-        </button>
+      {/* Admin Moderation Queue Tabs (V2) vs Safety Reports Overview Strip (V1) */}
+      {FEATURES.FEEDBACK_AND_APPEALS ? (
+        <div className="flex items-center p-1 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/90 dark:border-slate-800 shadow-xs">
+          <button
+            type="button"
+            onClick={() => setAdminTab('appeals')}
+            className={`flex-1 py-2.5 px-3 text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer ${
+              adminTab === 'appeals'
+                ? 'bg-[#3A0F34] dark:bg-[#EAAA00] text-white dark:text-[#240720] shadow-xs'
+                : 'text-slate-600 dark:text-slate-400 hover:text-[#3A0F34] dark:hover:text-slate-200'
+            }`}
+          >
+            <ShieldAlert className="w-4 h-4" />
+            <span>Suspension Appeals ({appeals.length})</span>
+          </button>
 
-        <button
-          type="button"
-          onClick={() => setAdminTab('reports')}
-          className={`flex-1 py-2.5 px-3 text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer ${
-            adminTab === 'reports'
-              ? 'bg-[#3A0F34] dark:bg-[#EAAA00] text-white dark:text-[#240720] shadow-xs'
-              : 'text-slate-600 dark:text-slate-400 hover:text-[#3A0F34] dark:hover:text-slate-200'
-          }`}
-        >
-          <Flag className="w-4 h-4" />
-          <span>Safety Reports ({reports.filter((r) => r.status === 'open').length} open)</span>
-        </button>
-      </div>
+          <button
+            type="button"
+            onClick={() => setAdminTab('reports')}
+            className={`flex-1 py-2.5 px-3 text-xs font-bold rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer ${
+              adminTab === 'reports'
+                ? 'bg-[#3A0F34] dark:bg-[#EAAA00] text-white dark:text-[#240720] shadow-xs'
+                : 'text-slate-600 dark:text-slate-400 hover:text-[#3A0F34] dark:hover:text-slate-200'
+            }`}
+          >
+            <Flag className="w-4 h-4" />
+            <span>Safety Reports ({reports.filter((r) => r.status === 'open').length} open)</span>
+          </button>
+        </div>
+      ) : (
+        <div className="bg-[#3A0F34] text-white rounded-3xl p-5 sm:p-6 shadow-md flex items-center justify-between gap-4 flex-wrap">
+          <div>
+            <div className="flex items-center gap-1.5 text-[11px] font-bold text-[#EAAA00] uppercase tracking-wider mb-1">
+              <Flag className="w-3.5 h-3.5" />
+              <span>Student Safety Queue</span>
+            </div>
+            <h2 className="text-lg sm:text-xl font-bold font-display">
+              Submitted Activity Safety Reports
+            </h2>
+            <p className="text-xs text-slate-300 mt-0.5">
+              Review student-submitted safety flags across campus activities and record moderation notes.
+            </p>
+          </div>
+          <div className="px-5 py-3 rounded-2xl bg-white/10 backdrop-blur-xs border border-white/10 text-center shrink-0">
+            <span className="block text-2xl sm:text-3xl font-black font-display text-[#EAAA00] tabular-nums">
+              {reports.filter((r) => r.status === 'open').length}
+            </span>
+            <span className="text-[11px] font-semibold text-slate-200 uppercase tracking-wider">
+              {reports.filter((r) => r.status === 'open').length === 1 ? 'Open Report' : 'Open Reports'}
+            </span>
+          </div>
+        </div>
+      )}
 
-      {adminTab === 'reports' ? (
+      {adminTab === 'reports' || !FEATURES.FEEDBACK_AND_APPEALS ? (
         <div className="space-y-4">
           {reportsError && (
             <div className="p-4 rounded-2xl bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-900/60 text-red-800 dark:text-red-200 flex items-start gap-3 text-xs">

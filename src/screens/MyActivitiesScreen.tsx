@@ -18,6 +18,7 @@ import {
 import { activityFirestoreService } from '../services/activityService';
 import { getPastActivitiesForUser, isActivityPast } from '../utils/activityRetention';
 import { FeedbackModal } from '../components/FeedbackModal';
+import { FEATURES } from '../config/features';
 
 interface MyActivitiesScreenProps {
   activities: Activity[];
@@ -278,7 +279,10 @@ export const MyActivitiesScreen: React.FC<MyActivitiesScreenProps> = ({
                   </button>
 
                   {/* Feedback button for past completed squads */}
-                  {activeTab === 'past' && act.status === 'completed' && act.participantIds.length > 1 && (
+                  {FEATURES.FEEDBACK_AND_APPEALS &&
+                    activeTab === 'past' &&
+                    act.status === 'completed' &&
+                    act.participantIds.length > 1 && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -397,7 +401,7 @@ export const MyActivitiesScreen: React.FC<MyActivitiesScreenProps> = ({
       )}
 
       {/* Squad Feedback Modal */}
-      {feedbackActivity && (
+      {FEATURES.FEEDBACK_AND_APPEALS && feedbackActivity && (
         <FeedbackModal
           isOpen={!!feedbackActivity}
           onClose={() => setFeedbackActivity(null)}

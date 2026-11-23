@@ -3,6 +3,7 @@ import { ActivityCategory, SkillLevel, SuspensionStatusInfo, UserProfile } from 
 import { CATEGORIES_CONFIG, VENUE_SUGGESTIONS } from '../data/seedData';
 import { Sparkles, MapPin, AlertCircle, Plus, Loader2, ShieldAlert } from 'lucide-react';
 import { feedbackService } from '../services/feedbackService';
+import { FEATURES } from '../config/features';
 
 interface CreateActivityScreenProps {
   currentUser: UserProfile;
@@ -53,13 +54,20 @@ export const CreateActivityScreen: React.FC<CreateActivityScreenProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Suspension status
-  const [isSuspended, setIsSuspended] = useState(Boolean(currentUserSuspension?.isSuspended));
+  // Suspension status (only active when feedback & appeals system is enabled)
+  const [isSuspended, setIsSuspended] = useState(
+    FEATURES.FEEDBACK_AND_APPEALS && Boolean(currentUserSuspension?.isSuspended)
+  );
   const [suspensionExpiry, setSuspensionExpiry] = useState<string | null>(
-    currentUserSuspension?.expiresAt || null
+    FEATURES.FEEDBACK_AND_APPEALS ? currentUserSuspension?.expiresAt || null : null
   );
 
   React.useEffect(() => {
+    if (!FEATURES.FEEDBACK_AND_APPEALS) {
+      setIsSuspended(false);
+      setSuspensionExpiry(null);
+      return;
+    }
     if (currentUserSuspension) {
       setIsSuspended(currentUserSuspension.isSuspended);
       setSuspensionExpiry(currentUserSuspension.expiresAt || null);
@@ -67,7 +75,7 @@ export const CreateActivityScreen: React.FC<CreateActivityScreenProps> = ({
   }, [currentUserSuspension?.isSuspended, currentUserSuspension?.expiresAt]);
 
   React.useEffect(() => {
-    if (!currentUser?.id) return;
+    if (!FEATURES.FEEDBACK_AND_APPEALS || !currentUser?.id) return;
     let active = true;
     feedbackService
       .getSuspensionStatusStrict(currentUser.id)
@@ -102,7 +110,7 @@ export const CreateActivityScreen: React.FC<CreateActivityScreenProps> = ({
     if (isSubmitting) return;
     setError(null);
 
-    if (isSuspended) {
+    if (FEATURES.FEEDBACK_AND_APPEALS && isSuspended) {
       setError(
         `Account suspended: You cannot create squads while your account is under temporary suspension (expires ${
           suspensionExpiry ? new Date(suspensionExpiry).toLocaleDateString() : 'in 15 days'
@@ -184,19 +192,19 @@ export const CreateActivityScreen: React.FC<CreateActivityScreenProps> = ({
           </div>
           <h1 className="text-2xl font-bold font-display text-white">Create Campus Activity</h1>
           <p className="text-xs text-[#DDE3E8]/80 dark:text-slate-400 mt-1">
-            Publish an activity for CGC students. Fellow students can discover and join in seconds.
+            Publish an activity for campus peers. Fellow users can discover and join in seconds.
           </p>
         </div>
 
         {/* Form Body */}
         <form onSubmit={handleSubmit} className="p-6 sm:p-8 space-y-6">
-          {isSuspended && (
+          {FEATURES.FEEDBACK_AND_APPEALS && isSuspended && (
             <div className="p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-900/60 rounded-2xl flex items-start gap-2.5 text-xs text-amber-900 dark:text-amber-200">
               <ShieldAlert className="w-5 h-5 shrink-0 text-amber-600 dark:text-amber-400 mt-0.5" />
               <div>
                 <span className="font-bold block">Account Temporarily Suspended</span>
                 <span>
-                  You received 5 distinct 1-star ratings. Squad creation is restricted until {suspensionExpiry ? new Date(suspensionExpiry).toLocaleDateString() : 'your suspension expires'}.
+                  Your account currently has a temporary moderation restriction until {suspensionExpiry ? new Date(suspensionExpiry).toLocaleDateString() : 'your suspension expires'}.
                 </span>
               </div>
             </div>

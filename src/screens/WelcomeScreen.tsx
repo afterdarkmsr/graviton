@@ -6,10 +6,12 @@ import { ThemeToggle } from '../components/ThemeToggle';
 
 interface WelcomeScreenProps {
   onGoogleSignInSuccess: (user: User) => void;
+  hasPendingVerificationLink?: boolean;
 }
 
 export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   onGoogleSignInSuccess,
+  hasPendingVerificationLink = false,
 }) => {
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
@@ -69,6 +71,18 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
             <p className="mt-4 text-sm sm:text-base text-[#DDE3E8]/90 leading-relaxed max-w-xl">
               Discover, create, and join spontaneous campus activities with compatible classmates in real time. Skip awkward group chats and meet up for badminton, cricket, coffee runs, and study squads.
             </p>
+
+            {hasPendingVerificationLink && (
+              <div className="mt-6 p-4 bg-[#EAAA00]/20 border border-[#EAAA00]/50 rounded-2xl flex items-start gap-2.5 text-xs text-amber-100">
+                <Sparkles className="w-4 h-4 shrink-0 text-[#EAAA00] mt-0.5" />
+                <div className="space-y-1">
+                  <span className="font-bold block text-white">Campus Email Link Detected</span>
+                  <p>
+                    Sign in with your primary Google account below first to finish linking your @cgcjhanjeri.in email without creating a duplicate account.
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Authentication Error Banner */}
             {authError && (

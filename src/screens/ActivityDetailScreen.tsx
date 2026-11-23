@@ -25,6 +25,7 @@ import {
 import { FeedbackModal } from '../components/FeedbackModal';
 import { UserProfileModal } from '../components/UserProfileModal';
 import { feedbackService } from '../services/feedbackService';
+import { FEATURES } from '../config/features';
 
 interface ActivityDetailScreenProps {
   activityId: string;
@@ -192,15 +193,17 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
     setIsActionLoading(true);
 
     try {
-      // Check authoritative userModeration suspension standing
-      const suspInfo = await feedbackService.getSuspensionStatusStrict(currentUser.id);
-      if (suspInfo.isSuspended || currentUserSuspension?.isSuspended) {
-        const exp = suspInfo.expiresAt || currentUserSuspension?.expiresAt;
-        throw new Error(
-          `Account suspended: You cannot join squads while under temporary suspension (expires ${
-            exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
-          }).`
-        );
+      if (FEATURES.FEEDBACK_AND_APPEALS) {
+        // Check authoritative userModeration suspension standing
+        const suspInfo = await feedbackService.getSuspensionStatusStrict(currentUser.id);
+        if (suspInfo.isSuspended || currentUserSuspension?.isSuspended) {
+          const exp = suspInfo.expiresAt || currentUserSuspension?.expiresAt;
+          throw new Error(
+            `Account suspended: You cannot join squads while under temporary suspension (expires ${
+              exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+            }).`
+          );
+        }
       }
 
       await activityFirestoreService.joinActivity(activity.id, currentUser);
@@ -317,7 +320,10 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
 
   const handleComplete = async () => {
     if (isActionLoading || !activity) return;
-    if (!confirm('Mark this squad activity as completed? Participants will be invited to leave feedback.')) {
+    const confirmPrompt = FEATURES.FEEDBACK_AND_APPEALS
+      ? 'Mark this squad activity as completed? Participants will be invited to leave feedback.'
+      : 'Mark this squad activity as completed? Coordination chat will switch to read-only mode.';
+    if (!confirm(confirmPrompt)) {
       return;
     }
     setActionError(null);
@@ -326,7 +332,11 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
 
     try {
       await activityFirestoreService.completeActivity(activity.id, currentUser.id);
-      setActionSuccess('Activity marked as completed! Squad members can now submit ratings and feedback.');
+      setActionSuccess(
+        FEATURES.FEEDBACK_AND_APPEALS
+          ? 'Activity marked as completed! Squad members can now submit ratings and feedback.'
+          : 'Activity marked as completed! Chat history is preserved in read-only mode.'
+      );
       setActivity((prev) => (prev ? { ...prev, status: 'completed' } : prev));
       onActivityUpdated();
     } catch (err: unknown) {
@@ -544,7 +554,9 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
                   HOST
                 </span>
               </div>
-              <span className="text-xs text-slate-500 dark:text-slate-400">CGC Student</span>
+              <span className="text-xs text-slate-500 dark:text-slate-400">
+                {activity.campus || 'Campus Student'}
+              </span>
             </div>
           </div>
 
@@ -597,7 +609,11 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
                   type="button"
                   onClick={() => setSelectedProfileUserId(id)}
                   className="flex items-center gap-2 bg-slate-100/80 dark:bg-slate-800 hover:bg-slate-200/90 dark:hover:bg-slate-700 px-3 py-1.5 rounded-xl border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer text-left"
-                  title="Click to view student reputation & feedback tags"
+                  title={
+                    FEATURES.FEEDBACK_AND_APPEALS
+                      ? 'Click to view student reputation & feedback tags'
+                      : 'Click to view student profile'
+                  }
                 >
                   <div
                     className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0"
@@ -643,7 +659,7 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
                   </div>
                 </div>
 
-                {activity.status === 'completed' && isJoined && (
+                {FEATURES.FEEDBACK_AND_APPEALS && activity.status === 'completed' && isJoined && (
                   <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/40 dark:to-orange-950/40 border border-amber-200 dark:border-amber-900/60 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
                     <div>
                       <span className="text-xs font-bold text-[#3A0F34] dark:text-amber-200 block flex items-center gap-1.5">
@@ -698,26 +714,40 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
               <span>This activity was cancelled by the host. Coordination chat remains viewable for participants.</span>
             </div>
           ) : activity.status === 'completed' ? (
-            <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/40 dark:to-orange-950/40 border border-amber-200 dark:border-amber-900/60 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <span className="text-xs font-bold text-[#3A0F34] dark:text-amber-200 block flex items-center gap-1.5">
-                  <Star className="w-3.5 h-3.5 fill-current text-[#EAAA00]" />
-                  Squad Completed · Feedback Open
-                </span>
-                <span className="text-[11px] text-slate-600 dark:text-slate-300">
-                  Rate your squad members to acknowledge great sportsmanship and community vibes.
-                </span>
+            FEATURES.FEEDBACK_AND_APPEALS ? (
+              <div className="p-4 bg-gradient-to-r from-amber-50 to-orange-50 dark:from-amber-950/40 dark:to-orange-950/40 border border-amber-200 dark:border-amber-900/60 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <span className="text-xs font-bold text-[#3A0F34] dark:text-amber-200 block flex items-center gap-1.5">
+                    <Star className="w-3.5 h-3.5 fill-current text-[#EAAA00]" />
+                    Squad Completed · Feedback Open
+                  </span>
+                  <span className="text-[11px] text-slate-600 dark:text-slate-300">
+                    Rate your squad members to acknowledge great sportsmanship and community vibes.
+                  </span>
+                </div>
+                {isJoined && activity.participantIds.length > 1 && (
+                  <button
+                    onClick={() => setIsFeedbackModalOpen(true)}
+                    className="py-2 px-4 bg-[#EAAA00] hover:bg-[#D69900] text-[#240720] font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
+                  >
+                    <Star className="w-3.5 h-3.5 fill-current" />
+                    <span>Leave Feedback</span>
+                  </button>
+                )}
               </div>
-              {isJoined && activity.participantIds.length > 1 && (
-                <button
-                  onClick={() => setIsFeedbackModalOpen(true)}
-                  className="py-2 px-4 bg-[#EAAA00] hover:bg-[#D69900] text-[#240720] font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 cursor-pointer shrink-0"
-                >
-                  <Star className="w-3.5 h-3.5 fill-current" />
-                  <span>Leave Feedback</span>
-                </button>
-              )}
-            </div>
+            ) : (
+              <div className="p-4 bg-slate-100 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-2xl text-xs text-slate-700 dark:text-slate-300 flex items-center gap-2.5">
+                <Lock className="w-4 h-4 text-slate-500 dark:text-slate-400 shrink-0" />
+                <div>
+                  <span className="font-bold text-[#3A0F34] dark:text-slate-100 block">
+                    Squad Completed
+                  </span>
+                  <span className="block text-[11px] text-slate-500 dark:text-slate-400">
+                    This activity has concluded. Coordination chat history is preserved in read-only mode.
+                  </span>
+                </div>
+              </div>
+            )
           ) : isHost ? (
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-[#FFF9EB] dark:bg-amber-950/30 border border-[#EAAA00]/40 dark:border-amber-900/60 rounded-2xl">
               <div>
@@ -726,7 +756,9 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
                 </span>
                 <span className="text-[11px] text-slate-600 dark:text-slate-300">
                   {isPast
-                    ? 'Mark this squad as completed so participants can submit feedback and ratings.'
+                    ? FEATURES.FEEDBACK_AND_APPEALS
+                      ? 'Mark this squad as completed so participants can submit feedback and ratings.'
+                      : 'Mark this squad as completed to archive it and close coordination chat.'
                     : 'Manage your squad, coordinate in chat, and mark completed when finished.'}
                 </span>
               </div>
@@ -762,7 +794,9 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
           ) : isPast ? (
             <div className="p-3 bg-slate-100 dark:bg-slate-800/80 text-slate-500 dark:text-slate-400 text-xs font-medium rounded-xl text-center">
               {isJoined
-                ? 'This activity has ended. Waiting for the host to mark it completed for feedback.'
+                ? FEATURES.FEEDBACK_AND_APPEALS
+                  ? 'This activity has ended. Waiting for the host to mark it completed for feedback.'
+                  : 'This activity has ended. Waiting for the host to mark it completed.'
                 : 'This activity has ended.'}
             </div>
           ) : isJoined ? (
@@ -981,7 +1015,7 @@ export const ActivityDetailScreen: React.FC<ActivityDetailScreenProps> = ({
       />
 
       {/* Feedback Modal for Completed Squad */}
-      {activity && (
+      {FEATURES.FEEDBACK_AND_APPEALS && activity && isFeedbackModalOpen && (
         <FeedbackModal
           isOpen={isFeedbackModalOpen}
           onClose={() => setIsFeedbackModalOpen(false)}

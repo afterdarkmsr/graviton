@@ -3,6 +3,7 @@ import { Activity, AvailabilityBroadcast, MatchRequest, SuspensionStatusInfo, Us
 import { availabilityService } from '../services/availabilityService';
 import { matchRequestService } from '../services/matchRequestService';
 import { feedbackService } from '../services/feedbackService';
+import { FEATURES } from '../config/features';
 import {
   Zap,
   Clock,
@@ -166,15 +167,17 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
     setErrorMessage(null);
     setIsSubmitting(true);
     try {
-      // Check authoritative userModeration suspension standing
-      const susp = await feedbackService.getSuspensionStatusStrict(currentUser.id);
-      if (susp.isSuspended || currentUserSuspension?.isSuspended) {
-        const exp = susp.expiresAt || currentUserSuspension?.expiresAt;
-        throw new Error(
-          `Account suspended: You cannot broadcast availability while under temporary suspension (expires ${
-            exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
-          }).`
-        );
+      if (FEATURES.FEEDBACK_AND_APPEALS) {
+        // Check authoritative userModeration suspension standing
+        const susp = await feedbackService.getSuspensionStatusStrict(currentUser.id);
+        if (susp.isSuspended || currentUserSuspension?.isSuspended) {
+          const exp = susp.expiresAt || currentUserSuspension?.expiresAt;
+          throw new Error(
+            `Account suspended: You cannot broadcast availability while under temporary suspension (expires ${
+              exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+            }).`
+          );
+        }
       }
 
       const activeInterest = isCustomInterest
@@ -234,25 +237,27 @@ export const FreeNowScreen: React.FC<FreeNowScreenProps> = ({
       return;
     }
 
-    // Check authoritative userModeration suspension standing
-    try {
-      const susp = await feedbackService.getSuspensionStatusStrict(currentUser.id);
-      if (susp.isSuspended || currentUserSuspension?.isSuspended) {
-        const exp = susp.expiresAt || currentUserSuspension?.expiresAt;
+    if (FEATURES.FEEDBACK_AND_APPEALS) {
+      // Check authoritative userModeration suspension standing
+      try {
+        const susp = await feedbackService.getSuspensionStatusStrict(currentUser.id);
+        if (susp.isSuspended || currentUserSuspension?.isSuspended) {
+          const exp = susp.expiresAt || currentUserSuspension?.expiresAt;
+          onToast?.(
+            `Account suspended: You cannot send match requests while under temporary suspension (expires ${
+              exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
+            }).`,
+            'error'
+          );
+          return;
+        }
+      } catch (err) {
         onToast?.(
-          `Account suspended: You cannot send match requests while under temporary suspension (expires ${
-            exp ? new Date(exp).toLocaleDateString() : 'in 15 days'
-          }).`,
+          err instanceof Error ? err.message : 'Unable to verify account standing.',
           'error'
         );
         return;
       }
-    } catch (err) {
-      onToast?.(
-        err instanceof Error ? err.message : 'Unable to verify account standing.',
-        'error'
-      );
-      return;
     }
 
     const alreadyPending = outgoingRequests.some(

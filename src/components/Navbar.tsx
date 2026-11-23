@@ -2,6 +2,7 @@ import React from 'react';
 import { ActiveTab, UserProfile } from '../types';
 import { Compass, Zap, Plus, CalendarCheck, User, ShieldAlert } from 'lucide-react';
 import { ThemeToggle } from './ThemeToggle';
+import { FEATURES } from '../config/features';
 
 interface NavbarProps {
   currentTab: ActiveTab;
@@ -118,7 +119,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 }`}
               >
                 <ShieldAlert className="w-3.5 h-3.5" />
-                <span>Appeals</span>
+                <span>{FEATURES.FEEDBACK_AND_APPEALS ? 'Appeals' : 'Safety Reports'}</span>
               </button>
             )}
           </nav>
@@ -133,8 +134,16 @@ export const Navbar: React.FC<NavbarProps> = ({
                     ? 'bg-[#3A0F34] text-[#EAAA00] ring-2 ring-[#EAAA00]'
                     : 'bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-900/60'
                 }`}
-                title="Review Suspension Appeals (Admin)"
-                aria-label="Admin Appeals"
+                title={
+                  FEATURES.FEEDBACK_AND_APPEALS
+                    ? 'Review Suspension Appeals & Safety Reports (Admin)'
+                    : 'Safety Reports Moderation Queue (Admin)'
+                }
+                aria-label={
+                  FEATURES.FEEDBACK_AND_APPEALS
+                    ? 'Admin Appeals'
+                    : 'Admin Safety Reports'
+                }
               >
                 <ShieldAlert className="w-4 h-4" />
               </button>

@@ -8,6 +8,7 @@ import {
   UserProfile,
 } from '../types';
 import { feedbackService } from '../services/feedbackService';
+import { FEATURES } from '../config/features';
 import {
   X,
   Star,
@@ -57,6 +58,12 @@ export const FeedbackModal: React.FC<FeedbackModalProps> = ({
   useEffect(() => {
     if (!isOpen || !activity.id || !currentUser.id) return;
 
+    if (!FEATURES.FEEDBACK_AND_APPEALS) {
+      setIsLoadingFeedbacks(false);
+      setExistingFeedbacks({});
+      return;
+    }
+
     setIsLoadingFeedbacks(true);
     setSubmitError(null);
     setSubmitSuccess(null);
@@ -79,7 +86,7 @@ export const FeedbackModal: React.FC<FeedbackModalProps> = ({
       });
   }, [isOpen, activity.id, currentUser.id]);
 
-  if (!isOpen) return null;
+  if (!isOpen || !FEATURES.FEEDBACK_AND_APPEALS) return null;
 
   const getParticipantInfo = (id: string) => {
     const isHost = id === activity.hostId || id === activity.createdBy;
@@ -299,7 +306,7 @@ export const FeedbackModal: React.FC<FeedbackModalProps> = ({
                     All Squad Feedback Submitted!
                   </h4>
                   <p className="text-[11px] text-emerald-700 dark:text-emerald-400">
-                    Thank you for contributing to safe and accountable student connections at CGC.
+                    Thank you for contributing to safe and accountable campus connections.
                   </p>
                 </div>
               )}

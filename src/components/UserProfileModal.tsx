@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { UserReputation } from '../types';
 import { feedbackService } from '../services/feedbackService';
-import { X, Star, Tag, Loader2, Sparkles } from 'lucide-react';
+import { FEATURES } from '../config/features';
+import { X, Star, Tag, Loader2, Sparkles, Shield } from 'lucide-react';
 
 interface UserProfileModalProps {
   isOpen: boolean;
@@ -29,6 +30,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
   useEffect(() => {
     if (!isOpen || !userId) return;
+
+    if (!FEATURES.FEEDBACK_AND_APPEALS) {
+      setReputation(null);
+      setIsLoading(false);
+      return;
+    }
 
     setIsLoading(true);
     feedbackService
@@ -91,7 +98,17 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
         {/* Content Body */}
         <div className="p-6 space-y-5">
-          {isLoading ? (
+          {!FEATURES.FEEDBACK_AND_APPEALS ? (
+            <div className="p-4 bg-slate-50 dark:bg-slate-800/60 rounded-2xl border border-slate-200/80 dark:border-slate-700 space-y-2 text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+              <div className="flex items-center gap-2 font-bold text-[#3A0F34] dark:text-slate-100">
+                <Shield className="w-4 h-4 text-[#EAAA00] shrink-0" />
+                <span>Campus Squad Member</span>
+              </div>
+              <p>
+                Coordinate meetups inside Squad Chat and always meet at named public campus venues. Use the Report button on any activity if you notice a safety concern.
+              </p>
+            </div>
+          ) : isLoading ? (
             <div className="py-8 flex flex-col items-center justify-center text-slate-400 gap-2">
               <Loader2 className="w-5 h-5 animate-spin text-[#EAAA00]" />
               <span className="text-xs">Loading campus reputation...</span>

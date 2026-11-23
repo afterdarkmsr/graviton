@@ -1,0 +1,207 @@
+name: Deploy Firestore Rules & Indexes (V1 Production)
+
+on:
+  workflow_dispatch:
+
+# Never cancel an in-flight Firestore production deployment
+concurrency:
+  group: deploy-firestore-vibematchcgc-production
+  cancel-in-progress: false
+
+# Default least-privilege permissions; each job declares only what it needs
+permissions: {}
+
+jobs:
+  verify-security-and-config:
+    name: Verify Config & Firestore Rules Security Suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Set up Java 21 (for Firestore Emulator)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install root dependencies (from bun.lock)
+        run: bun install --frozen-lockfile
+
+      - name: Install Cloud Functions dependencies (from functions/package-lock.json)
+        run: npm --prefix functions ci
+
+      - name: Install Firebase CLI
+        run: |
+          npm install -g firebase-tools
+          firebase --version
+          java -version
+
+      - name: Verify Firebase project and named Firestore database configuration
+        run: |
+          node -e '
+            const fs = require("fs");
+            const expectedProject = "vibematchcgc";
+            const expectedDb = "ai-studio-vibematch-09820417-4ebc-451c-a187-a205e2662ff9";
+
+            const rc = JSON.parse(fs.readFileSync(".firebaserc", "utf8"));
+            if (rc?.projects?.default !== expectedProject) {
+              console.error("Expected .firebaserc default project:", expectedProject, "found:", rc?.projects?.default);
+              process.exit(1);
+            }
+
+            const cfg = JSON.parse(fs.readFileSync("firebase.json", "utf8"));
+            if (!Array.isArray(cfg.firestore) || cfg.firestore.length !== 1) {
+              console.error("Expected firebase.json firestore to be a single-entry array targeting the named database. Found:", cfg.firestore);
+              process.exit(1);
+            }
+
+            const entry = cfg.firestore[0];
+            if (!entry.database || entry.database === "(default)" || entry.database !== expectedDb) {
+              console.error("Refusing to proceed: firebase.json must explicitly target named database", expectedDb, "and never (default). Found:", entry.database);
+              process.exit(1);
+            }
+
+            if (entry.rules !== "firestore.rules" || entry.indexes !== "firestore.indexes.json") {
+              console.error("Unexpected rules/indexes paths in firebase.json:", entry);
+              process.exit(1);
+            }
+
+            if (!fs.existsSync("firestore.rules")) {
+              console.error("Missing firestore.rules");
+              process.exit(1);
+            }
+
+            const indexes = JSON.parse(fs.readFileSync("firestore.indexes.json", "utf8"));
+            if (!Array.isArray(indexes.indexes)) {
+              console.error("Invalid firestore.indexes.json: missing indexes array");
+              process.exit(1);
+            }
+
+            console.log("Verified .firebaserc project:", rc.projects.default);
+            console.log("Verified firebase.json named Firestore database:", entry.database);
+            console.log("Verified firestore.indexes.json count:", indexes.indexes.length);
+          '
+
+      - name: Frontend TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Cloud Functions TypeScript check
+        run: npm --prefix functions exec -- tsc --noEmit
+
+      - name: Emulator rules test script TypeScript check
+        run: npx tsc --ignoreConfig --noEmit --skipLibCheck --target es2022 --module nodenext --moduleResolution nodenext --esModuleInterop --types node scripts/testFirestoreRulesEmulator.ts
+
+      - name: Run 24 security-hardening verification tests
+        run: npx tsx scripts/verifySecurityHardening.ts
+
+      - name: Run Firestore Emulator security rules suite (local demo project only)
+        env:
+          FIRESTORE_EMULATOR_HOST: 127.0.0.1:8080
+        run: |
+          firebase emulators:exec --only firestore --project demo-vibematch-test "npx tsx scripts/testFirestoreRulesEmulator.ts"
+
+  deploy-firestore-production:
+    name: Deploy Firestore Rules & Indexes to vibematchcgc
+    needs: verify-security-and-config
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # Requires manual reviewer approval configured on the GitHub "production" environment
+    environment: production
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Validate production target lock and WIF configuration
+        env:
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          DEPLOY_SA: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          VAR_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+          VAR_DATABASE_ID: ${{ vars.FIRESTORE_DATABASE_ID }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const expectedProject = "vibematchcgc";
+            const expectedDb = "ai-studio-vibematch-09820417-4ebc-451c-a187-a205e2662ff9";
+
+            if (!process.env.WIF_PROVIDER || !process.env.DEPLOY_SA) {
+              console.error("Missing required GitHub variables: GCP_WORKLOAD_IDENTITY_PROVIDER and/or GCP_DEPLOY_SERVICE_ACCOUNT.");
+              console.error("Follow FIRESTORE_DEPLOY_SETUP.md to configure Workload Identity Federation.");
+              process.exit(1);
+            }
+
+            if (process.env.VAR_PROJECT_ID && process.env.VAR_PROJECT_ID !== expectedProject) {
+              console.error("FIREBASE_PROJECT_ID variable mismatch. Expected:", expectedProject, "got:", process.env.VAR_PROJECT_ID);
+              process.exit(1);
+            }
+
+            if (process.env.VAR_DATABASE_ID && process.env.VAR_DATABASE_ID !== expectedDb) {
+              console.error("FIRESTORE_DATABASE_ID variable mismatch. Expected:", expectedDb, "got:", process.env.VAR_DATABASE_ID);
+              process.exit(1);
+            }
+
+            const rc = JSON.parse(fs.readFileSync(".firebaserc", "utf8"));
+            const cfg = JSON.parse(fs.readFileSync("firebase.json", "utf8"));
+            const entry = Array.isArray(cfg.firestore) && cfg.firestore.length === 1 ? cfg.firestore[0] : null;
+
+            if (rc?.projects?.default !== expectedProject || !entry || entry.database !== expectedDb) {
+              console.error("Target lock validation failed for project/database configuration.");
+              process.exit(1);
+            }
+
+            console.log("Production target lock passed:", expectedProject, "/", expectedDb);
+          '
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Firebase CLI
+        run: |
+          npm install -g firebase-tools
+          firebase --version
+
+      - name: Authenticate to Google Cloud via Workload Identity Federation
+        id: gcp-auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Deploy Firestore security rules (named database only)
+        run: |
+          firebase deploy \
+            --project vibematchcgc \
+            --only firestore:rules \
+            --non-interactive
+
+      - name: Deploy Firestore indexes (named database only)
+        run: |
+          firebase deploy \
+            --project vibematchcgc \
+            --only firestore:indexes \
+            --non-interactive
